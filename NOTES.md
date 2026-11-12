@@ -2,6 +2,17 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-12 20:55: black widgets - FitnessWidget kept out of Metal; Music / MusicWidgets crash is the media
+  library, not the GPU** (no kernel change; phone file changed, user OK'd).
+  - FitnessWidget (Activity rings) made a Metal device ~75 times on the 0284 boot: buffers / textures refused
+    (`OutOfMemory(Device)`) and the process killed by jetsam, reason namespace 1 code 7 = per-process memory limit
+    (a widget extension's limit is small; Turnip + the bridge + its GPU memory exceed it). Each relaunch failed the
+    same way -> a black widget. **`/var/local/mtl2-clients` = `*,-FitnessWidget`** (was `*`; old file kept as
+    `mtl2-clients.sweet-pre-widgets` on the phone and `~/ios-umi-backup/gpu-2026-11-11/mtl2-clients.star`, both read
+    back): it takes CA's CPU path as before 2026-11-05. The running widget process keeps its device until it
+    restarts (or the next boot). Undo: put `*` back.
+  - MusicWidgets (SIGSEGV x6) and the Music app crash in MediaPlayer `-[MPMediaLibrary _MediaLibrary_coreLibrary]`
+    -> std::string(nullptr): the media library database path is null on this install - a data/setup issue, open.
 - **2026-11-12 20:45: 0284 APPS WITH THEIR OWN FRAMEWORKS LAUNCH: NewTerm and PojavLauncher work** (patch
   `xnu/patches/0284-umi-amfi-dyld-at-paths.patch`; image **`shim/out/umi-0284-atpath.img`** = 0283 + this, the new
   daily image).
