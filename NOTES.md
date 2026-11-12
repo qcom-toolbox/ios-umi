@@ -2,6 +2,25 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-12 20:35: 0283 VSYNC FIXED-RATE + REFRESH PERIOD: App Library blur partly back, idle redraw gone** (patch
+  `xnu/patches/0283-umi-fb-vsync-fixed-rate.patch`; image **`shim/out/umi-0283-vsync.img`** = 0282b's line, the new
+  daily image; log: session scratchpad `umi-0283-live.log`).
+  - After the trace showed CoreAnimation's own blur radius collapsing (entry below), the clock CA runs its animations
+    on: SweetFramebuffer's vsync (notification 5, a 60 Hz IOTimerEventSource) was re-armed `setTimeoutUS(16667)`
+    after each tick's work - so "60 Hz" ran slower and jittered - and its notification carried (count, mach time,
+    **0**): the third value is the refresh period, which CA adds to the vsync time for its next deadline. ios-flame
+    (Pixel 4, same stack) found both (its kernel 0087 fixed-rate vsync, 0121 the period: "CA saw every frame's
+    deadline as already past"; swipes 15.8 -> 21 fps); hakios notes CA also reads IOMFBDisplayRefresh. Own code here:
+    the timer is armed first in each tick, for a deadline one period after the previous one (re-based if late), and
+    the notification sends the period (16667 us in mach ticks). `sweetfb_vsyncfix=0` = the old behaviour.
+  - **User:** the App Library background is now a still picture instead of flashing, and **"if i try to go to the
+    right the blur is back"; scrolling the App Library makes it buggy again.** So the blur radius is no longer
+    collapsing at rest - the timing was (part of) the cause; what is left happens while the App Library scrolls.
+  - **Numbers:** at rest backboardd no longer redraws at 10 Hz for ever: **1 frame per 10 s** (0282b: 104 frames
+    and 100 submits per 10 s at rest); animating rounds 29-34 fps (gaps mostly 17-36 ms), backboardd 26 % of a core
+    while used.
+  - Next for the blur: trace the offsets again while scrolling (`phone/metal2/frontend-pass-trace.diff`), and publish
+    IOMFBDisplayRefresh (hakios) in case CA still derives a wrong rate.
 - **2026-11-12 20:00: APP LIBRARY BLUR - THE GPU DRAWS WHAT IT IS ASKED; CoreAnimation's own blur offsets collapse to 0
   within ~8 frames of every opening** (no kernel change; a tracing build of the bridge front end, `phone/metal2/
   frontend-pass-trace.diff` on NativeBridgeMetalFrontend.mm, booted on 0282b for two captures, then the original plugin

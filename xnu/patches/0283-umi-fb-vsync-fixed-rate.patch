@@ -1,0 +1,120 @@
+From 65032cf09c7a97a9c903595d09eca820a70b866c Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:38:07 +0100
+Subject: [PATCH] umi: display (0283): vsync timer keeps fixed 60 Hz deadlines
+ and its notification carries the refresh period (was re-armed after each
+ tick's work, period 0); sweetfb_vsyncfix=0 = old
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 49 +++++++++++++++++++++++----
+ 1 file changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e66a365..6164458 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -26,7 +26,7 @@
+  *
+  * SwapEnd copies the enabled layers' surfaces into the panel memory (no
+  * scaling, CPU copy). Vsync (notification type 5) is a 60 Hz timer that
+- * sends (count, mach_absolute_time, 0) as 32-bit halves to clients that
++ * sends (count, mach_absolute_time, period) as 32-bit halves to clients that
+  * enabled it, through the port they registered (IOConnectSetNotificationPort).
+  *
+  * The panel memory itself is published as an IOSurface and returned as the
+@@ -105,6 +105,9 @@ class AppleCLCD : public IOMobileFramebuffer {
+ 	IOWorkLoop         *fWorkLoop;
+ 	IOTimerEventSource *fVsync;
+ 	uint64_t            fVsyncCount;
++	uint64_t            fVsyncPeriod;   /* (0283) one refresh in mach ticks */
++	uint64_t            fVsyncNext;     /* (0283) the deadline the timer was armed for */
++	bool                fVsyncFixed;    /* (0283) fixed-rate deadlines + the period in the notification */
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+ 	static IOReturn gpuHoldBeginAction(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+@@ -301,7 +304,18 @@ AppleCLCD::start(IOService *provider)
+ 	if (fRetireTicks < 1 || fRetireTicks > SWEET_FB_RETIRE_MAX) {
+ 		fRetireTicks = 3;
+ 	}
+-	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++	/* (0283) the vsync timer keeps fixed-rate deadlines and its notification carries the refresh period
++	 * (sweetfb_vsyncfix=0: the old behaviour, re-armed 16.7 ms after each tick's work and period 0) */
++	uint32_t vsyncFix = 1;
++	PE_parse_boot_argn("sweetfb_vsyncfix", &vsyncFix, sizeof(vsyncFix));
++	fVsyncFixed = vsyncFix != 0;
++	nanoseconds_to_absolutetime((uint64_t)SWEET_FB_VSYNC_US * 1000ull, &fVsyncPeriod);
++	fVsyncNext = mach_absolute_time() + fVsyncPeriod;
++	if (fVsyncFixed) {
++		fVsync->wakeAtTime(fVsyncNext);
++	} else {
++		fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++	}
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+@@ -361,10 +375,27 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	/*
++	 * (0283) The vsync clock CoreAnimation, backboardd and every display link pace and time their animations on.
++	 * Before, the timer was re-armed 16.7 ms after each tick's work (copies, presents, retire queue), so "60 Hz"
++	 * drifted to longer, jittery intervals, and the notification's third value - the refresh period, which CA
++	 * takes as its timestamp's refresh period and adds to the vsync time for the next deadline - was 0. Now the
++	 * timer is armed first, for a fixed deadline one period after the previous one (re-based if a tick came late),
++	 * and the period is sent. Prompted by ios-flame's notes (its kernel 0087 / 0121: fixed-rate vsync, "CA saw
++	 * every frame's deadline as already past" with period 0); own code.
++	 */
++	uint64_t period = fb->fVsyncFixed ? fb->fVsyncPeriod : 0;
++	if (fb->fVsyncFixed) {
++		fb->fVsyncNext += fb->fVsyncPeriod;
++		if (fb->fVsyncNext <= now) {
++			fb->fVsyncNext = now + fb->fVsyncPeriod;
++		}
++		sender->wakeAtTime(fb->fVsyncNext);
++	}
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+-		0, 0,
++		(uint32_t)period, (uint32_t)(period >> 32),
+ 	};
+ 
+ 	IOLockLock(fb->fLock);
+@@ -381,7 +412,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 					fb->scanBoot();
+ 				}
+ 				IOLockUnlock(fb->fLock);
+-				sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++				if (!fb->fVsyncFixed) {
++					sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++				}
+ 				return;
+ 			}
+ 			/* the hold ended with the display off: end it, then fade from what the GPU drew */
+@@ -415,7 +448,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 				}
+ 			}
+ 		}
+-		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++		if (!fb->fVsyncFixed) {
++			sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++		}
+ 		return;
+ 	}
+ 	/* the GPU's picture in the boot framebuffer (sweet_fb_gpu_begin): shown alone until the hold ends, then the latest frame again */
+@@ -492,7 +527,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		sweet_fb_path_stats();
+ 	}
+ 	sweet_fb_dump_idle(fb);
+-	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++	if (!fb->fVsyncFixed) {
++		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++	}
+ }
+ 
+ void
+-- 
+2.54.0 (Apple Git-157)
+
