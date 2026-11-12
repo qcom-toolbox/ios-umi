@@ -34,7 +34,8 @@
     on, every no-argument number-returning method of the bridge's classes (274 getters: NB*, NativeBridgeMetalDevice)
     is routed through forwardInvocation (original implementation, then calls / values recorded; a summary every
     500 ms), plus respondsToSelector:. Result over three openings: **CoreAnimation reads almost nothing from the
-    bridge and nothing time-related** - never GPUStartTime / GPUEndTime / kernel times; only texture
+    bridge, and its GPU times are sane** - GPUStartTime / GPUEndTime read once each in the capture (150.8595 /
+    150.8604 s against host 150.8607 s: right clock, start before end); otherwise only texture
     width/height/pixelFormat/usage/storageMode/isMemoryless/mipmapLevelCount/rowBytes/allocatedSize (constant,
     e.g. the 1125x2436 drawable), buffer length 262144, command-buffer status 4 (completed), committed, and
     `deviceLinearReadOnlyTextureAlignmentBytes` 16; no respondsToSelector: queries reached the probe. The offsets
