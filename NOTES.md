@@ -11,6 +11,12 @@
     `mtl2-clients.sweet-pre-widgets` on the phone and `~/ios-umi-backup/gpu-2026-11-11/mtl2-clients.star`, both read
     back): it takes CA's CPU path as before 2026-11-05. The running widget process keeps its device until it
     restarts (or the next boot). Undo: put `*` back.
+  - **Then the other Apple widgets (Notes...): shown, then black.** They are rendered by chronod, which had a Metal
+    device since 2026-11-05. **`/var/local/mtl2-clients` = `*,-FitnessWidget,-chronod`** (previous file kept as
+    `mtl2-clients.sweet-pre-chronod` on the phone and `~/ios-umi-backup/gpu-2026-11-11/mtl2-clients.no-fitness`,
+    both read back); rebooted on 0284 (21:59): **user "you fixed widget"** - chronod back on CA's CPU path. Why
+    chronod's Metal frames go black was not looked into (a widget snapshot drawn by one process and composited by
+    another: the cross-process surface path).
   - MusicWidgets (SIGSEGV x6) and the Music app crash in MediaPlayer `-[MPMediaLibrary _MediaLibrary_coreLibrary]`
     -> std::string(nullptr): the media library database path is null on this install - a data/setup issue, open.
 - **2026-11-12 20:45: 0284 APPS WITH THEIR OWN FRAMEWORKS LAUNCH: NewTerm and PojavLauncher work** (patch

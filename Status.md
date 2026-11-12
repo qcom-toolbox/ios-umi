@@ -94,7 +94,7 @@
 | ⚙️ Power-up | GMU / RPMh, zap shader authenticated by TrustZone | ✅ |
 | 🧾 Command streams | The command processor runs our streams | ✅ |
 | 🎨 Metal | Over Mesa's turnip (`sweetmtl`) and the metal2vulkan bridge (ios-apollo's series), fence interrupts; a hung GPU is reset and goes on (0282); submits ~2 ms of kernel time (was ~8) | ✅ |
-| 📱 Metal for every app | `/var/local/mtl2-clients` = `*`: SpringBoard, posters, widgets, Safari and any app get a Metal device; the AegirPoster crash loop is gone | ✅ |
+| 📱 Metal for every app | `/var/local/mtl2-clients` = `*,-FitnessWidget,-chronod`: SpringBoard, posters, Safari and any app get a Metal device; widgets (chronod, FitnessWidget) stay on the CPU, they went black on Metal | ✅ |
 | 🧭 Safari | Pages draw on the GPU (WebKit.GPU); the address bar glitches, the status bar is white, a link tap sometimes does nothing | ⚠️ |
 | 🧮 GPU memory | Wired RAM, reported per app every 10 s; caps (kernel 0251): 768 MB per app, 1536 MB for all apps, 1 GB of RAM kept free; backboardd and SpringBoard uncapped. GPU address windows given back when a process exits (0250) | ✅ |
 | 🖼️ CoreAnimation on the GPU | Composites through Metal on the GPU and scans out directly; only the App Library background blur still glitches; backboardd idle at rest (0283: no more 10 Hz redraw), 29-37 fps while animating | ✅ |
