@@ -30,6 +30,23 @@
     what the bridge answers for GPU timing (`GPUStartTime` / `GPUEndTime` from `nmb_command_buffer_gpu_time`,
     `kernelStartTime` = 0), drawable presented times, and any value CA reads back from a GPU buffer (backdrop
     statistics) - log what CA asks of the device / command buffer around an opening.
+  - **Second capture (20:15, getter probe; same diff, `phone/metal2/frontend-pass-trace.diff`):** while the trace is
+    on, every no-argument number-returning method of the bridge's classes (274 getters: NB*, NativeBridgeMetalDevice)
+    is routed through forwardInvocation (original implementation, then calls / values recorded; a summary every
+    500 ms), plus respondsToSelector:. Result over three openings: **CoreAnimation reads almost nothing from the
+    bridge and nothing time-related** - never GPUStartTime / GPUEndTime / kernel times; only texture
+    width/height/pixelFormat/usage/storageMode/isMemoryless/mipmapLevelCount/rowBytes/allocatedSize (constant,
+    e.g. the 1125x2436 drawable), buffer length 262144, command-buffer status 4 (completed), committed, and
+    `deviceLinearReadOnlyTextureAlignmentBytes` 16; no respondsToSelector: queries reached the probe. The offsets
+    collapsed the same way again (0.001751 -> 0.001484 -> 0.000668 -> 7.1e-5 -> 6.5e-7 -> 6.7e-11 -> 8.8e-19 ->
+    1.3e-34 -> 0; and 0.001613 -> ... -> 0). So the bridge does not feed the collapse through a getter. Still open:
+    (1) whether the logged uniforms are what the GPU reads - the trace copies buffer 1 at the draw call, and
+    CoreAnimation may fill its uniform ring after encoding the draw (then the logged values are a previous frame's
+    leftovers, and the "collapse" is partly a trace artefact); next capture should copy the same bytes again at
+    commit and at completion; (2) if the values hold at commit, CA's own state feeds back on itself (squared each
+    frame), e.g. through a value it derives from the previous frame's GPU output via shared memory.
+    Capture: `~/ios-umi-backup/gpu-2026-11-11/traces/trace3-getters.log`. The original plugin is back on the phone
+    (read back, sha256 d21e0263...); the running boot keeps the probe build until the next reboot.
   - Ruled out by this trace: viewport / scissor / render-area mismatch in the blur chain, wrong pooled-texture sizes,
     texture recycling inside a frame (the chain's textures are written before they are read), the composite's
     sampling scale (texel scale 1/284, 1/611 as sent).

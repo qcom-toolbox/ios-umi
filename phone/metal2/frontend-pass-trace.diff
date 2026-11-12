@@ -1,6 +1,14 @@
 --- NativeBridgeMetalFrontend.mm.pre-trace	2026-11-11 23:10:02
-+++ NativeBridgeMetalFrontend.mm	2026-11-12 19:56:48
-@@ -768,6 +768,7 @@
++++ NativeBridgeMetalFrontend.mm	2026-11-12 20:10:36
+@@ -10,6 +10,7 @@
+ #import <Metal/Metal.h>
+ #import <IOSurface/IOSurfaceRef.h>
+ #import <objc/runtime.h>
++#import <objc/message.h>
+ #include <algorithm>
+ #include <atomic>
+ #include <initializer_list>
+@@ -768,6 +769,7 @@
  @end
  @interface NBRenderPipeline : NBObject
  @property(nonatomic) NmbRenderPipeline *handle;
@@ -8,7 +16,7 @@
  @end
  @implementation NBRenderPipeline
  - (void)dealloc {nmb_render_pipeline_release(_handle);}
-@@ -886,7 +887,72 @@
+@@ -886,7 +888,172 @@
  @property(nonatomic,strong) NSMutableDictionary *userDict;
  - (void)refuse:(NSString *)what;
  @end
@@ -23,16 +31,117 @@
 +static std::atomic<unsigned> gTrPass{0};
 +static void *gTrSmall[64];
 +static unsigned gTrSmallNext;
++static void trProbes(bool on);
++static void prDump();
++static bool gPrInstalled;
++static uint64_t gPrDumped;
++static void trLine(const char *fmt,...) __attribute__((format(printf,1,2)));
 +static bool trOn() {
 + const uint64_t now=nowUs();
-+ std::lock_guard<std::mutex> lock(gTrLock);
-+ if(now-gTrChecked>200000) {
-+  gTrChecked=now;
-+  const bool on=access("/var/local/mtl2-trace-on",F_OK)==0;
-+  if(on && !gTrState)gTrBytes=0;
-+  gTrState=on;
++ int change=0;
++ {
++  std::lock_guard<std::mutex> lock(gTrLock);
++  if(now-gTrChecked>200000) {
++   gTrChecked=now;
++   const bool on=access("/var/local/mtl2-trace-on",F_OK)==0;
++   if(on && !gTrState){gTrBytes=0;change=1;}
++   if(!on && gTrState)change=-1;
++   gTrState=on;
++  }
 + }
++ if(change)trProbes(change>0);
++ if(gPrInstalled && now-gPrDumped>500000){gPrDumped=now;prDump();trLine("T host=%.6f",(double)now/1e6);}
++ std::lock_guard<std::mutex> lock(gTrLock);
 + return gTrState && gTrBytes<30000000;
++}
++// ---- getter probe (trace 2): while the trace is on, every no-argument method of the bridge's classes that returns a number
++// (and respondsToSelector:) goes through forwardInvocation, which runs the original and records calls and values per
++// class/selector; a summary every 500 ms. Off again (original implementations back) when the trace stops.
++struct TrProbe {Class cls;SEL sel;IMP orig;Method m;char type;uint64_t calls;double last,minv,maxv;uint64_t changes;};
++static std::mutex gPrLock;
++static std::vector<TrProbe> gPr;
++static std::unordered_map<std::string,uint64_t> gPrAsked;
++static TrProbe *prFind(Class c,SEL sel) {
++ for(;c;c=class_getSuperclass(c))for(auto &p:gPr)if(p.cls==c && p.sel==sel)return &p;
++ return nullptr;
++}
++static void prForward(id self,SEL _cmd,NSInvocation *inv) {
++ IMP orig=nullptr;char type=0;
++ {std::lock_guard<std::mutex> lock(gPrLock);TrProbe *p=prFind(object_getClass(self),inv.selector);if(p){orig=p->orig;type=p->type;}}
++ if(!orig){[self doesNotRecognizeSelector:inv.selector];return;}
++ ((void (*)(id,SEL,IMP))objc_msgSend)(inv,sel_registerName("invokeUsingIMP:"),orig);
++ double v=0;
++ switch(type) {
++  case 'd':{double x;[inv getReturnValue:&x];v=x;break;}
++  case 'f':{float x;[inv getReturnValue:&x];v=x;break;}
++  case 'Q':case 'L':{unsigned long long x;[inv getReturnValue:&x];v=(double)x;break;}
++  case 'q':case 'l':{long long x;[inv getReturnValue:&x];v=(double)x;break;}
++  case 'I':{unsigned x;[inv getReturnValue:&x];v=x;break;}
++  case 'i':{int x;[inv getReturnValue:&x];v=x;break;}
++  case 'B':case 'c':case 'C':{unsigned char x;[inv getReturnValue:&x];v=x;break;}
++  case 'S':case 's':{unsigned short x;[inv getReturnValue:&x];v=x;break;}
++ }
++ std::lock_guard<std::mutex> lock(gPrLock);
++ TrProbe *p=prFind(object_getClass(self),inv.selector);
++ if(!p)return;
++ if(p->calls==0){p->minv=p->maxv=v;}
++ else{if(v!=p->last)p->changes++;if(v<p->minv)p->minv=v;if(v>p->maxv)p->maxv=v;}
++ p->calls++;p->last=v;
++ if(type=='d' && p->calls<=400)trLine("G %s %s = %.6f (host %.6f)",class_getName(p->cls),sel_getName(p->sel),v,(double)nowUs()/1e6);
++}
++static BOOL prResponds(id self,SEL _cmd,SEL asked) {
++ BOOL r=class_respondsToSelector(object_getClass(self),asked);
++ {
++  std::lock_guard<std::mutex> lock(gPrLock);
++  std::string k=std::string(class_getName(object_getClass(self)))+" "+(asked?sel_getName(asked):"(null)")+(r?" yes":" NO");
++  if(gPrAsked[k]++==0)trLine("R %s",k.c_str());
++ }
++ return r;
++}
++static void prDump() {
++ std::lock_guard<std::mutex> lock(gPrLock);
++ for(auto &p:gPr)if(p.calls){
++  trLine("S %s %s calls=%llu last=%.6g min=%.6g max=%.6g changes=%llu",class_getName(p.cls),sel_getName(p.sel),p.calls,p.last,p.minv,p.maxv,p.changes);
++  p.calls=0;p.changes=0;
++ }
++}
++static void trProbes(bool on) {
++ std::lock_guard<std::mutex> lock(gPrLock);
++ if(on && !gPrInstalled) {
++  static const char *const skip[]={"handle","dealloc",".cxx_destruct","retain","release","autorelease","retainCount","hash",
++   "class","self","zone","isProxy","superclass","description","debugDescription","commandBuffer","refused","surface",
++   "descriptor","requestDescriptor","buffer","parent","trName","globalTraceObjectID","isa"};
++  int nclasses=0;Class *classes=objc_copyClassList((unsigned *)&nclasses);
++  for(int c=0;c<nclasses;c++) {
++   const char *name=class_getName(classes[c]);
++   if(strncmp(name,"NB",2)!=0 && strncmp(name,"NativeBridgeMetal",17)!=0 && strncmp(name,"SweetMTL2",9)!=0)continue;
++   unsigned n=0;Method *ms=class_copyMethodList(classes[c],&n);
++   bool any=false;
++   for(unsigned i=0;i<n;i++) {
++    const char *sn=sel_getName(method_getName(ms[i]));
++    if(strchr(sn,':'))continue;
++    bool skipIt=false;for(const char *k:skip)if(!strcmp(sn,k))skipIt=true;
++    if(skipIt)continue;
++    char rt[16]={};method_getReturnType(ms[i],rt,sizeof(rt));
++    if(!strchr("dfQqLlIiBcCSs",rt[0]) || rt[1])continue;
++    TrProbe p={};p.cls=classes[c];p.sel=method_getName(ms[i]);p.m=ms[i];p.type=rt[0];
++    gPr.push_back(p);any=true;
++   }
++   free(ms);
++   if(any) {
++    class_addMethod(classes[c],@selector(forwardInvocation:),(IMP)prForward,"v24@0:8@16");
++    if(!class_addMethod(classes[c],@selector(respondsToSelector:),(IMP)prResponds,"B24@0:8:16")){}
++   }
++  }
++  free(classes);
++  for(auto &p:gPr)p.orig=method_setImplementation(p.m,(IMP)_objc_msgForward);
++  gPrInstalled=true;
++  trLine("G probes on: %zu getters",gPr.size());
++ } else if(!on && gPrInstalled) {
++  for(auto &p:gPr)method_setImplementation(p.m,p.orig);
++  gPrInstalled=false;
++  trLine("G probes off");
++ }
 +}
 +static void trFlushLocked() {
 + if(gTrText.empty())return;
@@ -41,7 +150,6 @@
 + if(fd>=0){(void)write(fd,gTrText.data(),gTrText.size());close(fd);}
 + gTrBytes+=gTrText.size();gTrText.clear();
 +}
-+static void trLine(const char *fmt,...) __attribute__((format(printf,1,2)));
 +static void trLine(const char *fmt,...) {
 + char buf[900];va_list ap;va_start(ap,fmt);int n=vsnprintf(buf,sizeof(buf)-1,fmt,ap);va_end(ap);
 + if(n<0)return;
@@ -82,7 +190,7 @@
  @property(nonatomic) NmbEncoder *handle;
  @property(nonatomic,strong) NBCommandBuffer *commandBuffer;
  @property(nonatomic) BOOL refused;
-@@ -916,6 +982,8 @@
+@@ -916,6 +1083,8 @@
   if(_refused){_refused=NO;return;}
   NmbEncoder *handle=_handle;_handle=nullptr;
   if(!handle){[_commandBuffer refuse:@"endEncoding twice"];return;}
@@ -91,7 +199,7 @@
   [self check:nmb_encoder_end(handle) what:"endEncoding"];
  }
  - (void)insertDebugSignpost:(NSString *)s {(void)s;}
-@@ -932,6 +1000,11 @@
+@@ -932,6 +1101,11 @@
    [_commandBuffer.resourceOwners addObject:buffer];
    if([(NBBuffer *)buffer surfaceOwner]){[_commandBuffer.surfaces addObject:buffer];[_commandBuffer.writtenSurfaces addObject:buffer];}
   }
@@ -103,18 +211,18 @@
   [self check:nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index) what:"setBuffer"];
  }
  - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
-@@ -943,6 +1016,10 @@
-   [_commandBuffer.surfaces addObject:t];
+@@ -944,6 +1118,10 @@
    const MTLTextureUsage u=t.usage;
    if(!u || (u&MTLTextureUsageShaderWrite))[_commandBuffer.writtenSurfaces addObject:t];
-+ }
+  }
 + if(trPass && stage==2 && index<8) {
 +  trTex[index]=(__bridge void *)texture;
 +  trTexW[index]=texture?(uint32_t)[(NBTexture *)texture descriptor].width:0;trTexH[index]=texture?(uint32_t)[(NBTexture *)texture descriptor].height:0;
-  }
++ }
   [self check:nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index) what:"setTexture"];
  }
-@@ -954,6 +1031,9 @@
+ - (void)sampler:(id<MTLSamplerState>)sampler index:(NSUInteger)index stage:(uint32_t)stage {
+@@ -954,6 +1132,9 @@
  }
  - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
   if(_refused)return;
@@ -124,7 +232,7 @@
   [self check:nmb_encoder_set_bytes(_handle,stage,bytes,length,(uint32_t)index) what:"setBytes"];
  }
  - (void)fence:(id<MTLFence>)fence stages:(uint64_t)stages update:(bool)update {
-@@ -976,6 +1056,7 @@
+@@ -976,6 +1157,7 @@
  - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
  - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
   if(_refused)return;
@@ -132,7 +240,7 @@
   [self check:nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index) what:"setBufferOffset"];
  }
  @end
-@@ -1039,10 +1120,37 @@
+@@ -1039,10 +1221,37 @@
  @interface NBRenderEncoder : NBEncoder
  @end
  @implementation NBRenderEncoder
@@ -170,7 +278,7 @@
   [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
  }
  - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
-@@ -1094,12 +1202,14 @@
+@@ -1094,12 +1303,14 @@
  - (void)setViewport:(MTLViewport)v {
   if(self.refused)return;
   const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
@@ -185,7 +293,7 @@
   [self check:nmb_render_set_scissor(self.handle,values) what:"setScissorRect"];
  }
  - (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)c {if(r && c)[self setScissorRect:r[0]];}
-@@ -1148,6 +1258,7 @@
+@@ -1148,6 +1359,7 @@
  - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
   if(self.refused)return;
   gDraws++;self.commandBuffer->encodedWork.draws++;
@@ -193,7 +301,7 @@
   [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
  }
  - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i {
-@@ -1162,6 +1273,7 @@
+@@ -1162,6 +1374,7 @@
   if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
   [self.commandBuffer.resourceOwners addObject:b];
   gDraws++;self.commandBuffer->encodedWork.draws++;
@@ -201,7 +309,7 @@
   [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
  }
  - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o
-@@ -1232,6 +1344,10 @@
+@@ -1232,6 +1445,10 @@
  - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
                toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
   if(![self textures:NB_OBJECTS(s,d) count:2])return;
@@ -212,7 +320,7 @@
   if([(NBTexture *)d surface])[self.commandBuffer.writtenSurfaces addObject:d];
   const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
   [self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b) what:"copyFromTexture:toTexture:"];
-@@ -1320,6 +1436,7 @@
+@@ -1320,6 +1537,7 @@
  }
  - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
   if(![self textures:NB_OBJECTS(t) count:1])return;
@@ -220,7 +328,7 @@
   if([(NBTexture *)t surface])[self.commandBuffer.writtenSurfaces addObject:t];
   [self check:nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle]) what:"generateMipmapsForTexture"];
  }
-@@ -1449,7 +1566,30 @@
+@@ -1449,7 +1667,30 @@
    [_resourceOwners addObject:d.visibilityResultBuffer];
    pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
   }
@@ -252,7 +360,7 @@
  }
  - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
  - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
-@@ -2375,7 +2515,13 @@
+@@ -2375,7 +2616,13 @@
   NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,&b->raw,&creation);delete b;gTimePipeline.add(pipelineBegan);
   if(logJournal)journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),NBCost::now().since(costBegan));
   if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
