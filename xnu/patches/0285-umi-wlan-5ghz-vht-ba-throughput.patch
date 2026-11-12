@@ -1,0 +1,1607 @@
+From 97ffd4dc9b8a696704a9ea91d93101e090943601 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 22:35:09 +0100
+Subject: [PATCH] umi: wlan (0285): 5 GHz, HT/VHT, Block Ack (REO window 256),
+ adaptive polling, 128 TX buffers, hidden-SSID & targeted-channel scans,
+ 128-BSS cache
+
+---
+ bsd/dev/redwood_net.c |  81 ++++-
+ bsd/dev/sweet_wlce.c  | 695 ++++++++++++++++++++++++++++++++++++++----
+ bsd/dev/sweet_wldp.c  | 231 ++++++++++++--
+ bsd/dev/sweet_wlsta.c |  95 +++++-
+ 4 files changed, 1003 insertions(+), 99 deletions(-)
+
+diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
+index e7b46fd..2d690ac 100644
+--- a/bsd/dev/redwood_net.c
++++ b/bsd/dev/redwood_net.c
+@@ -11,6 +11,7 @@
+  * What carries the frames is a link driver's business; sys/redwood_net.h is all that the two
+  * know of each other. The first link is QEMU's virtio network device (redwood_virtio_net.c).
+  */
++#include <sys/param.h>
+ #include <kern/clock.h>
+ #include <kern/locks.h>
+ #include <kern/thread.h>
+@@ -268,15 +269,84 @@ redwood_net_link_state(bool up)
+ 	net_link_event(net_ifp, up ? KEV_DL_LINK_ON : KEV_DL_LINK_OFF);
+ }
+ 
++/*
++ * umi 0285: the throughput meter. Each second the bytes in and out are counted; a second with more than
++ * 1 Mbit/s in either direction starts (or continues) a burst, and 3 quiet seconds end it with one line:
++ * how long, the mean and the best second each way. A speed test or a big download leaves its numbers in
++ * the log without a tool on the phone (boot-arg sweetnetmeter=0: off).
++ */
++static struct {
++	uint64_t at, in, out;                   /* start of the current second (ns), bytes then */
++	uint64_t burst_in, burst_out;           /* bytes in the burst so far */
++	uint32_t secs, quiet, best_in, best_out;        /* best second, kbit/s */
++} meter;
++
++static void
++net_meter(void)
++{
++	uint64_t now, ns;
++	clock_get_uptime(&now);
++	absolutetime_to_nanoseconds(now, &ns);
++	if (meter.at == 0) {
++		meter.at = ns;
++		meter.in = net_count.received_bytes;
++		meter.out = net_count.sent_bytes;
++		return;
++	}
++	if (ns - meter.at < NSEC_PER_SEC) {
++		return;
++	}
++	uint64_t span = ns - meter.at, din = net_count.received_bytes - meter.in, dout = net_count.sent_bytes - meter.out;
++	uint32_t kin = (uint32_t)(din * 8 * 1000000ull / span), kout = (uint32_t)(dout * 8 * 1000000ull / span);       /* kbit/s */
++	meter.at = ns;
++	meter.in = net_count.received_bytes;
++	meter.out = net_count.sent_bytes;
++	if (kin >= 1000 || kout >= 1000) {
++		meter.secs++;
++		meter.quiet = 0;
++		meter.burst_in += din;
++		meter.burst_out += dout;
++		meter.best_in = MAX(meter.best_in, kin);
++		meter.best_out = MAX(meter.best_out, kout);
++		return;
++	}
++	if (meter.secs != 0 && ++meter.quiet >= 3) {
++		printf("net: %s throughput: %u s busy; in %llu.%llu Mbit/s mean (best second %u.%u), out %llu.%llu Mbit/s mean "
++		    "(best second %u.%u); %llu KB in, %llu KB out\n", net_link->name, meter.secs,
++		    meter.burst_in * 8 / meter.secs / 1000000, meter.burst_in * 8 / meter.secs / 100000 % 10, meter.best_in / 1000,
++		    meter.best_in / 100 % 10, meter.burst_out * 8 / meter.secs / 1000000, meter.burst_out * 8 / meter.secs / 100000 % 10,
++		    meter.best_out / 1000, meter.best_out / 100 % 10, meter.burst_in / 1024, meter.burst_out / 1024);
++		bzero(&meter, sizeof(meter));
++	}
++}
++
+ /* The interface's own thread: for a link that wants to be asked, and for the minute's line in the log. */
+ static void
+ net_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+-	uint64_t said = 0, total;
++	uint64_t said = 0, total, last_sent = 0;
+ 	unsigned quiet = 0;
++	uint32_t metered = 1;
+ 
++	(void)PE_parse_boot_argn("sweetnetmeter", &metered, sizeof(metered));
+ 	for (unsigned tick = 1;; tick++) {
+-		quiet = net_link->poll != NULL && net_link->poll() ? 0 : quiet + 1;
++		unsigned worked = 0;
++		for (unsigned round = 0; round < 4; round++) {
++			unsigned n = net_link->poll != NULL ? net_link->poll() : 0;
++			worked += n;
++			if (n < 16) {
++				break;
++			}
++		}
++		if (worked != 0 || net_count.sent != last_sent) {
++			last_sent = net_count.sent;
++			quiet = 0;
++		} else {
++			quiet++;
++		}
++		if (metered) {
++			net_meter();
++		}
+ 		/* about once a minute, if anything has moved since */
+ 		total = net_count.sent + net_count.received + net_count.dropped_out + net_count.dropped_in;
+ 		if (tick % 8192 == 0 && total != said) {
+@@ -285,7 +355,12 @@ net_thread(__unused void *parameter, __unused wait_result_t result)
+ 			    net_count.sent, net_count.sent_bytes, net_count.received, net_count.received_bytes,
+ 			    net_count.dropped_out, net_count.dropped_in);
+ 		}
+-		delay_for_interval(quiet < 100 ? 2 : 10, NSEC_PER_MSEC);
++		/* 250 us while a burst is active (0-2 ms idle transition, 10 ms at rest) */
++		if (quiet < 10) {
++			delay_for_interval(250, NSEC_PER_USEC);
++		} else {
++			delay_for_interval(quiet < 100 ? 2 : 10, NSEC_PER_MSEC);
++		}
+ 	}
+ }
+ 
+diff --git a/bsd/dev/sweet_wlce.c b/bsd/dev/sweet_wlce.c
+index 2fc3888..7623a24 100644
+--- a/bsd/dev/sweet_wlce.c
++++ b/bsd/dev/sweet_wlce.c
+@@ -27,6 +27,9 @@ extern void sweet_wlip_lease(uint32_t *addr, uint32_t *mask, uint32_t *router);
+ extern int sweet_wlif_attach(const uint8_t mac[6], uint32_t addr, uint32_t mask, uint32_t router, void (*poll)(void));
+ extern void sweet_wldp_mon_report(void);
+ extern int sweet_wldp_rx_tid_qdesc(unsigned tid, uint32_t *pa);
++extern int sweet_wldp_rx_tid_ba(unsigned tid, unsigned window, int ssn);       /* 0285 */
++extern uint32_t sweet_wldp_rx_tid_pa(unsigned tid);
++extern unsigned sweet_wldp_rx_tid_flush(void);
+ extern void sweet_wldp_data_poll(void);
+ extern void sweet_wldp_data_report(void);
+ extern void sweet_wldp_set_bssid(const uint8_t bssid[6]);
+@@ -344,16 +347,17 @@ static struct {
+ 	uint8_t htt_major, htt_minor;
+ 	bool scan_started, scan_done;
+ 	uint32_t scan_fail, chan_events, mgmt_frames;
++#define WLCE_BSS_MAX    128u
+ 	unsigned nbss;
+-	uint8_t bss[32][6];
+-	uint8_t bss_ssid[32][33];       /* raw SSID bytes (0140: join by name) */
+-	uint32_t bss_ch[32];
++	uint8_t bss[WLCE_BSS_MAX][6];
++	uint8_t bss_ssid[WLCE_BSS_MAX][33];     /* raw SSID bytes (0140: join by name) */
++	uint32_t bss_ch[WLCE_BSS_MAX];
+ 	/* 0202: what the station (sweet_wlsta.c) tells wifid of each, refreshed by every beacon / probe response */
+-	uint8_t bss_ssid_len[32];
+-	int16_t bss_rssi[32];
+-	uint16_t bss_bint[32], bss_cap[32], bss_ielen[32];
+-	uint64_t bss_seen[32];          /* ms of uptime */
+-	uint8_t bss_ies[32][SWEET_WLCE_IES];
++	uint8_t bss_ssid_len[WLCE_BSS_MAX];
++	int16_t bss_rssi[WLCE_BSS_MAX];
++	uint16_t bss_bint[WLCE_BSS_MAX], bss_cap[WLCE_BSS_MAX], bss_ielen[WLCE_BSS_MAX];
++	uint64_t bss_seen[WLCE_BSS_MAX];        /* ms of uptime */
++	uint8_t bss_ies[WLCE_BSS_MAX][SWEET_WLCE_IES];
+ 	uint32_t scan_req;
+ 	/* join (0140) */
+ 	uint8_t join_bssid[6];
+@@ -366,6 +370,19 @@ static struct {
+ 	/* 0203: WPA2-PSK */
+ 	bool rsn, key_done;
+ 	uint32_t key_status;
++	/* 0249: 5 GHz, HT/VHT: what the join chose, and an ADDBA request from the AP to answer from the poll */
++	uint32_t join_mhz, join_center, join_width, join_phymode;
++	bool addba_pending;
++	uint8_t addba_token, addba_params[4];
++	uint32_t addba_seen;
++	/* 0285: ADDBA requests per TID (token, parameter set + timeout, SSN) and DELBAs, answered from the poll */
++	uint8_t ba_asked, ba_ended, ba_active;
++	uint8_t ba_token[8], ba_params[8][4];
++	uint16_t ba_ssn[8], ba_window[8];
++	uint32_t ba_sessions, ba_refused;
++	/* 0286: the joined network's name (for probes to the AP) and beacons / probe responses heard from the AP */
++	uint8_t join_ssid[32], join_ssid_len;
++	uint32_t ap_heard;
+ } htc;
+ 
+ #define WMI_EV_BIT(id)          ((id) < 0x4000u ? 1ull << ((id) & 31) : 1ull << (32 + ((id) & 31)))
+@@ -677,6 +694,10 @@ wmi_mgmt_rx(const uint8_t *hdr, const uint8_t *m, uint32_t len)
+ 	if (f == NULL || fl < 24) {
+ 		return;
+ 	}
++	/* 0286: the AP's beacons and probe responses while joined: it is still there (sweet_wlsta.c's beacon-loss check) */
++	if (htc.joined && (f[0] == 0x80 || f[0] == 0x50) && fl >= 24 && memcmp(f + 16, htc.join_bssid, 6) == 0) {
++		htc.ap_heard++;
++	}
+ 	/* 0143: after association, every other management frame between us and the AP (deauth 0xc0 / disassoc 0xa0
+ 	 * with reason code, action 0xd0 with category) */
+ 	if (htc.joined && f[0] != 0x80 && f[0] != 0x50 && fl >= 24 &&
+@@ -686,6 +707,29 @@ wmi_mgmt_rx(const uint8_t *hdr, const uint8_t *m, uint32_t len)
+ 			htc.lost = true;        /* 0202: deauthenticated / disassociated: the station says so (sweet_wlsta.c) */
+ 			htc.lost_why = f[0] << 16 | code;
+ 		}
++		/*
++		 * 0249: ADDBA request (Block Ack category 3, action 0: token, parameters, timeout, SSN) to us: mac80211
++		 * answers these for ath11k (RX aggregation is the host's, ath11k_dp_rx_ampdu_start); the receive
++		 * reorder queues here stay at window 1, so the answer, sent from the poll, declines (status 37).
++		 */
++		if (f[0] == 0xd0 && fl >= 33 && f[24] == 3 && f[25] == 0 && memcmp(f + 4, wlce_mac, 6) == 0) {
++			/* 0285: per TID (parameter set bits 5:2), with the starting sequence number (SSN 15:4 of f[31..32]) */
++			unsigned tid = f[27] >> 2 & 7u;
++			htc.ba_token[tid] = f[26];
++			memcpy(htc.ba_params[tid], f + 27, 4);
++			htc.ba_ssn[tid] = (uint16_t)((f[31] | f[32] << 8) >> 4);
++			htc.ba_asked |= (uint8_t)(1u << tid);
++			htc.addba_pending = true;
++			if (htc.addba_seen++ >= 8) {
++				return;
++			}
++		}
++		/* 0285: DELBA (action 2) from the AP as the originator (initiator bit 11): that TID's window back to 2 */
++		if (f[0] == 0xd0 && fl >= 28 && f[24] == 3 && f[25] == 2 && memcmp(f + 4, wlce_mac, 6) == 0 &&
++		    ((f[26] | f[27] << 8) >> 11 & 1u)) {
++			htc.ba_ended |= (uint8_t)(1u << ((f[26] | f[27] << 8) >> 12 & 7u));
++			htc.addba_pending = true;
++		}
+ 		printf("SWEET WMI: mgmt from AP after join: subtype %#x, %u bytes, %s %u, to us %d\n", f[0], fl,
+ 		    f[0] == 0xd0 ? "category" : "reason", f[0] == 0xd0 ? (uint32_t)f[24] : code, memcmp(f + 4, wlce_mac, 6) == 0);
+ 		return;
+@@ -724,36 +768,62 @@ wmi_mgmt_rx(const uint8_t *hdr, const uint8_t *m, uint32_t len)
+ 	 */
+ 	const uint8_t *bssid = f + 16;
+ 	uint64_t now = wlce_now_ms();
+-	unsigned i, oldest = 0;
++	unsigned i, oldest = WLCE_BSS_MAX;
+ 	bool known = false;
+ 	for (i = 0; i < htc.nbss; ++i) {
+ 		if (memcmp(htc.bss[i], bssid, 6) == 0) {
+ 			known = true;
+ 			break;
+ 		}
+-		if (htc.bss_seen[i] < htc.bss_seen[oldest]) {
++		if (htc.joined && memcmp(htc.bss[i], htc.join_bssid, 6) == 0) {
++			continue;               /* never evict the AP we are currently joined to */
++		}
++		if (oldest == WLCE_BSS_MAX || htc.bss_seen[i] < htc.bss_seen[oldest]) {
+ 			oldest = i;
+ 		}
+ 	}
+-	if (!known && htc.nbss >= 32) {
+-		i = oldest;
++	if (!known && htc.nbss >= WLCE_BSS_MAX) {
++		i = oldest < WLCE_BSS_MAX ? oldest : 0;
+ 	}
+ 	uint32_t ch = get32(hdr), mhz = get32(hdr + 64);
+ 	if (mhz == 0 && ch >= 1 && ch <= 13) {
+ 		mhz = 2407 + 5 * ch;
+ 	} else if (mhz == 0 && ch == 14) {
+ 		mhz = 2484;
++	} else if (mhz == 0 && ch >= 32 && ch <= 177) {        /* 0249: 5 GHz (ath11k wmi.c: channels 36..177) */
++		mhz = 5000 + 5 * ch;
+ 	}
+ 	char ssid[33] = {0};
+ 	unsigned ssid_len = 0;
+ 	if (fl >= 38 && f[36] == 0) {
+ 		ssid_len = MIN((unsigned)f[37], MIN(fl - 38, 32u));
+ 		memcpy(ssid, f + 38, ssid_len);
++		/* 0286: some hidden networks send a name of N zero bytes instead of none: that is no name either */
++		bool blank = true;
++		for (unsigned k = 0; k < ssid_len; k++) {
++			blank &= ssid[k] == 0;
++		}
++		if (blank) {
++			ssid_len = 0;
++		}
+ 	}
+ 	if (!known || ssid_len != 0) {         /* (a hidden network's beacons have no name; its probe response does) */
+ 		memcpy(htc.bss_ssid[i], ssid, sizeof(ssid));
+ 		htc.bss_ssid_len[i] = (uint8_t)ssid_len;
+ 	}
++	/* 0249: the AP's own channel (DS parameter set, else HT operation), not the one the radio heard it on */
++	for (uint32_t o = 36; o + 2 < fl && o + 2 + f[o + 1] <= fl; o += 2 + f[o + 1]) {
++		if ((f[o] == 3 && f[o + 1] >= 1) || (f[o] == 61 && f[o + 1] >= 1)) {
++			uint32_t own = f[o + 2];
++			if ((own >= 1 && own <= 14) || (own >= 32 && own <= 177)) {
++				ch = own;
++				mhz = own == 14 ? 2484 : own <= 14 ? 2407 + 5 * own : 5000 + 5 * own;
++			}
++			if (f[o] == 3) {
++				break;
++			}
++		}
++	}
+ 	memcpy(htc.bss[i], bssid, 6);
+ 	htc.bss_ch[i] = ch;
+ 	htc.bss_rssi[i] = (int16_t)((int32_t)get32(hdr + 4) - 95);
+@@ -765,7 +835,7 @@ wmi_mgmt_rx(const uint8_t *hdr, const uint8_t *m, uint32_t len)
+ 	if (known) {
+ 		return;
+ 	}
+-	if (htc.nbss < 32) {
++	if (htc.nbss < WLCE_BSS_MAX) {
+ 		htc.nbss++;
+ 	}
+ 	for (unsigned k = 0; ssid[k]; ++k) {
+@@ -904,13 +974,55 @@ wmi_cmd(uint32_t id, const void *body, uint32_t len, const char *name)
+  * (0x56, streams 0x19b), START_SCAN 0x3001 (0x4d). pdev_id 0 = SoC level
+  * (single-pdev chip). Events: SCAN 0x3001 (tag 0x24), MGMT_RX 0x7001 (0x2c).
+  */
+-#define SCAN_NCHAN      13
++#define SCAN_NCHAN      38
++
++/*
++ * 0249: the channels scanned and tuned to: 2.4 GHz 1-13, then 5 GHz 36-48 (UNII-1), 52-64 and 100-144
++ * (DFS: listen only, as cfg80211 marks radar channels NO_IR), 149-165 (listen only: not open to
++ * probing in the world domain "00" this radio is set to). Boot-arg sweetwl5g=0: 2.4 GHz only (0248's list).
++ */
++static const uint16_t wlce_chan_mhz[SCAN_NCHAN] = {
++	2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472,
++	5180, 5200, 5220, 5240, 5260, 5280, 5300, 5320,
++	5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640, 5660, 5680, 5700, 5720,
++	5745, 5765, 5785, 5805, 5825,
++};
++
++static unsigned
++wlce_nchan(void)
++{
++	uint32_t on = 1;
++	(void)PE_parse_boot_argn("sweetwl5g", &on, sizeof(on));
++	return on ? SCAN_NCHAN : 13;
++}
++
++/* listen only (and radar: 52-144) */
++static bool
++wlce_chan_passive(uint32_t mhz, bool *radar)
++{
++	*radar = mhz >= 5260 && mhz <= 5720;
++	return mhz > 5240;
++}
++
++/* boot-arg sweetwlht=0: legacy rates only and the 11g / 11a channel modes (0248's join) */
++static bool
++wlce_ht_on(void)
++{
++	uint32_t on = 1;
++	(void)PE_parse_boot_argn("sweetwlht", &on, sizeof(on));
++	return on != 0;
++}
+ 
+ /*
+  * START_SCAN of 2412-2472 MHz on vdev 0 and the wait for its end (0202: also the station's scan,
+  * while joined too: the firmware visits the other channels between beacons of the AP's).
+  * 0, 12 not sent, 13 not started; whether it completed is htc.scan_done.
+  */
++/* 0286: a network asked for by name in the next scan (a hidden one answers only to its name), length 0: none */
++static uint8_t wlce_scan_name[32], wlce_scan_name_len;
++static uint16_t wlce_scan_mhz[SCAN_NCHAN], wlce_scan_dwell;
++static unsigned wlce_scan_nmhz;
++
+ static int
+ wmi_start_scan(unsigned active)
+ {
+@@ -928,28 +1040,35 @@ wmi_start_scan(unsigned active)
+ 	b[3] = 0;                       /* vdev_id */
+ 	b[4] = 1;                       /* priority low */
+ 	b[5] = 0x1f | 0x40;             /* started, completed, bss chan, foreign chan, dequeued, start failed */
+-	b[6] = 50;                      /* dwell active */
++	b[6] = wlce_scan_dwell != 0 ? MAX(20u, MIN((unsigned)wlce_scan_dwell, 200u)) : 50u;     /* dwell active */
+ 	b[7] = 150;                     /* dwell passive */
+ 	b[8] = 50;                      /* min rest */
+ 	b[9] = 500;                     /* max rest */
+ 	b[13] = 20000;                  /* max scan time */
+ 	b[14] = 5;                      /* probe delay */
+ 	b[15] = (active ? 0 : 0x1) | 0x10;      /* PASSIVE, CHAN_STAT_EVENT */
+-	b[17] = SCAN_NCHAN;
++	unsigned nchan = wlce_scan_nmhz != 0 ? wlce_scan_nmhz : wlce_nchan();
++	const uint16_t *chans = wlce_scan_nmhz != 0 ? wlce_scan_mhz : wlce_chan_mhz;
++	b[17] = nchan;
+ 	b[18] = 1;                      /* num_bssid */
+-	b[19] = active ? 1 : 0;         /* num_ssids */
++	b[19] = active ? 1u + (wlce_scan_name_len != 0) : 0;   /* num_ssids (0286: + the one asked for by name) */
+ 	b[20] = active ? sizeof(ies) : 0;       /* ie_len */
+ 	b[37] = 40;                     /* dwell active 6G */
+ 	b[38] = 30;                     /* dwell passive 6G */
+ 	uint32_t *p = b + 40;
+-	*p++ = WMI_TLV(0x10, SCAN_NCHAN * 4);
+-	for (unsigned i = 0; i < SCAN_NCHAN; ++i) {
+-		*p++ = 2412 + 5 * i;
++	*p++ = WMI_TLV(0x10, nchan * 4);
++	for (unsigned i = 0; i < nchan; ++i) {
++		*p++ = chans[i];
+ 	}
+ 	if (active) {
+-		*p++ = WMI_TLV(0x13, 36);       /* wmi_ssid: u32 length 0 (wildcard), 32 bytes */
+-		bzero(p, 36);
++		*p++ = WMI_TLV(0x13, 36 * (1u + (wlce_scan_name_len != 0)));  /* wmi_ssid: u32 length 0 (wildcard), 32 bytes */
++		bzero(p, 72);
+ 		p += 9;
++		if (wlce_scan_name_len != 0) {
++			p[0] = wlce_scan_name_len;
++			memcpy(p + 1, wlce_scan_name, wlce_scan_name_len);
++			p += 9;
++		}
+ 	} else {
+ 		*p++ = WMI_TLV(0x13, 0);
+ 	}
+@@ -964,8 +1083,9 @@ wmi_start_scan(unsigned active)
+ 	} else {
+ 		*p++ = WMI_TLV(0x11, 0);
+ 	}
+-	printf("SWEET WMI: %s scan of 2412-2472 MHz from %02x:%02x:%02x:%02x:%02x:%02x\n", active ? "active" : "passive",
+-	    wlce_mac[0], wlce_mac[1], wlce_mac[2], wlce_mac[3], wlce_mac[4], wlce_mac[5]);
++	printf("SWEET WMI: %s scan of %u channels (%u-%u MHz) from %02x:%02x:%02x:%02x:%02x:%02x\n", active ? "active" : "passive",
++	    nchan, (unsigned)chans[0], (unsigned)chans[nchan - 1], wlce_mac[0], wlce_mac[1], wlce_mac[2], wlce_mac[3], wlce_mac[4],
++	    wlce_mac[5]);
+ 	htc.scan_started = htc.scan_done = false;
+ 	htc.scan_fail = 0;
+ 	if (wmi_cmd(0x3001u, b, (uint32_t)((uint8_t *)p - (uint8_t *)b), "START_SCAN") != 0) {
+@@ -1071,21 +1191,28 @@ wmi_scan(void)
+ 		}
+ 	}
+ 
+-	/* ath11k_reg_update_chan_list for 2.4 GHz channels 1-13 (all usable actively in the EU): 11G, HE allowed, 20 dBm */
++	/*
++	 * ath11k_reg_update_chan_list: 2.4 GHz channels 1-13 (all usable actively in the EU) as 11G, 0249: and
++	 * the 5 GHz ones as 11A, listen-only / DFS as wlce_chan_passive says; HT, VHT and HE allowed; 20 dBm.
++	 */
++	unsigned nchan = wlce_nchan();
+ 	bzero(b, sizeof(b));
+ 	b[0] = WMI_TLV(0x4f, 12);
+-	b[1] = SCAN_NCHAN;              /* num_scan_chans; flags 0, pdev_id 0 */
+-	b[4] = WMI_TLV(0x12, 7 * 4 * SCAN_NCHAN - 4);   /* ath11k sets the array length 4 short */
+-	for (unsigned i = 0; i < SCAN_NCHAN; ++i) {
+-		uint32_t *c = b + 5 + 7 * i, mhz = 2412 + 5 * i;
++	b[1] = nchan;                   /* num_scan_chans; flags 0, pdev_id 0 */
++	b[4] = WMI_TLV(0x12, 7 * 4 * nchan - 4);        /* ath11k sets the array length 4 short */
++	for (unsigned i = 0; i < nchan; ++i) {
++		uint32_t *c = b + 5 + 7 * i, mhz = wlce_chan_mhz[i];
++		bool radar, passive = wlce_chan_passive(mhz, &radar);
+ 		c[0] = WMI_TLV(0x50, 24);
+ 		c[1] = mhz;
+ 		c[2] = mhz;
+-		c[4] = 1u | (active ? 0 : 1u << 7) | 1u << 17;  /* MODE_11G, PASSIVE for a passive scan, ALLOW_HE */
++		/* MODE_11G / MODE_11A, PASSIVE (7), DFS (10), ALLOW_HT (11), ALLOW_VHT (12), ALLOW_HE (17) */
++		c[4] = (mhz < 4000 ? 1u : 0u) | (!active || passive ? 1u << 7 : 0) | (radar ? 1u << 10 : 0) |
++		    (wlce_ht_on() ? 1u << 11 | 1u << 12 : 0) | 1u << 17;
+ 		c[5] = 40u << 8 | 40u << 16;            /* max power, max reg power (0.5 dBm units) */
+ 		c[6] = 40u << 8;                        /* max tx power */
+ 	}
+-	if (wmi_cmd(0x3003u, b, (5 + 7 * SCAN_NCHAN) * 4, "SCAN_CHAN_LIST") != 0) {
++	if (wmi_cmd(0x3003u, b, (5 + 7 * nchan) * 4, "SCAN_CHAN_LIST") != 0) {
+ 		return 10;
+ 	}
+ 
+@@ -1184,12 +1311,22 @@ static int
+ wmi_mgmt_tx(const uint8_t *frame, uint32_t len, uint32_t desc)
+ {
+ 	static uint32_t b[10 + 16];
++	static unsigned slot;
+ 	uint32_t inl = MIN(len, 64u);
+-	memcpy((void *)(ce.mem + M_MGMT_TX), frame, len);
++	/*
++	 * 0285: four 2 KiB frame buffers used in turn (0x7c000-0x7e000; 0x7f000 is sweet_wldp.c's): the
++	 * ADDBA answers for several TIDs and a probe go out back to back, before the firmware has read
++	 * the one before -- with a single buffer each would overwrite the last.
++	 */
++	uint32_t off = M_MGMT_TX + (slot++ % 4u) * 0x800u;
++	if (len > 0x800u) {
++		return EINVAL;
++	}
++	memcpy((void *)(ce.mem + off), frame, len);
+ 	bzero(b, sizeof(b));
+ 	b[0] = WMI_TLV(0x1a6, 8 * 4);
+ 	b[2] = desc;                    /* vdev 0, chanfreq 0 (on-channel) */
+-	b[4] = ce.pa + M_MGMT_TX;
++	b[4] = ce.pa + off;
+ 	b[6] = len;
+ 	b[7] = inl;
+ 	b[9] = WMI_TLV(0x11, inl);
+@@ -1278,6 +1415,54 @@ wlce_rsn_check(const uint8_t *ies, unsigned len)
+ 	return -1;
+ }
+ 
++/* 0249: an element of the AP's (id, at least `least` bytes long) or NULL; WMM is vendor 00-50-f2 type 2 */
++static const uint8_t *
++wlce_ie(const uint8_t *ies, unsigned len, unsigned id, unsigned least)
++{
++	for (unsigned o = 0; o + 2 <= len && o + 2 + ies[o + 1] <= len; o += 2 + ies[o + 1]) {
++		if (ies[o] == id && ies[o + 1] >= least) {
++			if (id != 221 || (ies[o + 2] == 0x00 && ies[o + 3] == 0x50 && ies[o + 4] == 0xf2 && ies[o + 5] == 2)) {
++				return ies + o;
++			}
++		}
++	}
++	return NULL;
++}
++
++/*
++ * 0249: what we say we can do, as ath11k builds it for this chip (ath11k_create_ht_cap / _vht_cap, minus
++ * transmit beamforming and transmit STBC, which need firmware set-up not done here): HT LDPC, 20/40 (only
++ * where the channel is 40 MHz or wider), SM power save off, short GI 20/40, one RX STBC stream; A-MPDU
++ * 64 KiB, no minimum spacing; MCS 0-7 per chain. VHT: MPDU 3895, RX LDPC, short GI 80, one RX STBC
++ * stream, A-MPDU exponent 7; MCS 0-9 per chain.
++ */
++#define OWN_HT_CAP      (0x0001u | 0x000cu | 0x0020u | 0x0100u)
++#define OWN_HT_CAP40    (0x0002u | 0x0040u)
++#define OWN_VHT_CAP     (0x00000010u | 0x00000020u | 0x00000100u | 7u << 23)
++
++/* VHT MCS map with MCS 0-9 for `nss` streams, the rest not supported */
++static uint16_t
++wlce_vht_map(unsigned nss)
++{
++	uint16_t m = 0xffff;
++	for (unsigned i = 0; i < nss && i < 8; i++) {
++		m = (uint16_t)((m & ~(3u << (2 * i))) | 2u << (2 * i));
++	}
++	return m;
++}
++
++/* per stream the lower of two VHT MCS maps (3 = not supported wins) */
++static uint16_t
++wlce_vht_min(uint16_t a, uint16_t b)
++{
++	uint16_t m = 0;
++	for (unsigned i = 0; i < 8; i++) {
++		unsigned x = a >> (2 * i) & 3u, y = b >> (2 * i) & 3u;
++		m |= (uint16_t)((x == 3 || y == 3 ? 3u : MIN(x, y)) << (2 * i));
++	}
++	return m;
++}
++
+ static int
+ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const uint8_t *pmk)
+ {
+@@ -1286,21 +1471,31 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	static const uint8_t rates[12] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
+ 	char want[33] = {0};
+ 	uint8_t bssid[6];
+-	unsigned i, best = 32;
++	unsigned i, best = WLCE_BSS_MAX;
+ 	if (wl == 0 || wl > 32) {
+ 		return 1;
+ 	}
+ 	for (i = 0; i < wl; ++i) {
+ 		want[i] = ssid[i] >= 0x20 && ssid[i] < 0x7f ? (char)ssid[i] : '?';     /* (for the log) */
+ 	}
+-	for (i = 0; i < MIN(htc.nbss, 32u); ++i) {
++	/*
++	 * 0249: band preference, as phones steer: a 5 GHz access point counts `sweetwl5gbonus` dB (default 15)
++	 * stronger than it is, unless it is heard below -80 dBm (a dual-band name otherwise lands on 2.4 GHz,
++	 * whose signal is nearly always the stronger).
++	 */
++	uint32_t bonus = 15;
++	(void)PE_parse_boot_argn("sweetwl5gbonus", &bonus, sizeof(bonus));
++	int score_best = -1000;
++	for (i = 0; i < MIN(htc.nbss, WLCE_BSS_MAX); ++i) {
++		int score = htc.bss_rssi[i] + (htc.bss_ch[i] > 14 && htc.bss_rssi[i] >= -80 ? (int)bonus : 0);
+ 		if (htc.bss_ssid_len[i] == wl && memcmp(htc.bss_ssid[i], ssid, wl) == 0 &&
+ 		    (want_bssid == NULL || memcmp(htc.bss[i], want_bssid, 6) == 0) &&
+-		    (best == 32 || htc.bss_rssi[i] > htc.bss_rssi[best])) {
++		    (best == WLCE_BSS_MAX || score > score_best)) {
+ 			best = i;
++			score_best = score;
+ 		}
+ 	}
+-	if (best == 32) {
++	if (best == WLCE_BSS_MAX) {
+ 		printf("SWEET WMI: \"%s\" not among the %u networks heard\n", want, htc.nbss);
+ 		return 1;
+ 	}
+@@ -1314,14 +1509,51 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	if (htc.rsn) {
+ 		sweet_wlsec_begin(pmk, bssid, wlce_mac, wlce_rsn_ie, sizeof(wlce_rsn_ie));
+ 	}
+-	uint32_t ch = htc.bss_ch[best], mhz = 2407 + 5 * ch;
++	uint32_t ch = htc.bss_ch[best], mhz = ch == 14 ? 2484 : ch < 14 ? 2407 + 5 * ch : 5000 + 5 * ch;
+ 	uint32_t chains = MIN(htc.num_rf_chains ? htc.num_rf_chains : 1, 8u);
++	/*
++	 * 0249: HT / VHT as mac80211 (ieee80211_determine_chan_mode) + ath11k: the AP's elements from the beacon
++	 * (copied: the table changes with every beacon). HT and VHT only with WMM (ath11k sets the HT/VHT peer
++	 * flags only for a QoS peer); VHT only at 5 GHz; width: 20 MHz at 2.4 GHz; at 5 GHz 80 MHz where the VHT
++	 * operation says so, else 40 where the HT operation names a second channel, else 20.
++	 * Boot-arg sweetwlwidth=20/40/80 caps the width; sweetwlht=0 joins as before (legacy).
++	 */
++	static uint8_t ap_ies[SWEET_WLCE_IES];
++	unsigned ap_ielen = htc.bss_ielen[best];
++	memcpy(ap_ies, htc.bss_ies[best], ap_ielen);
++	const uint8_t *e_ht = wlce_ie(ap_ies, ap_ielen, 45, 26), *e_htop = wlce_ie(ap_ies, ap_ielen, 61, 22);
++	const uint8_t *e_vht = wlce_ie(ap_ies, ap_ielen, 191, 12), *e_vhtop = wlce_ie(ap_ies, ap_ielen, 192, 3);
++	bool five = mhz > 4000, wmm = wlce_ie(ap_ies, ap_ielen, 221, 7) != NULL;
++	bool ht = wlce_ht_on() && wmm && e_ht != NULL, vht = ht && five && e_vht != NULL;
++	uint32_t width = 20, center = mhz, most = 80;
++	(void)PE_parse_boot_argn("sweetwlwidth", &most, sizeof(most));
++	if (vht && most >= 80 && e_vhtop != NULL && e_vhtop[2] >= 1 && e_vhtop[3] >= 36) {
++		uint32_t c80 = 5000 + 5 * e_vhtop[3];
++		if (mhz + 30 >= c80 && mhz <= c80 + 30) {
++			width = 80;
++			center = c80;
++		}
++	}
++	/* HT operation: primary channel, then info byte 1: secondary channel offset 1:0 (1 above, 3 below), any width 2 */
++	unsigned sco = e_htop != NULL ? e_htop[3] & 3u : 0;
++	if (width == 20 && ht && five && most >= 40 && e_htop != NULL && (e_htop[3] & 4u) && (sco == 1 || sco == 3)) {
++		width = 40;
++		center = sco == 1 ? mhz + 10 : mhz - 10;
++	}
++	htc.join_mhz = mhz;
++	htc.join_center = center;
++	htc.join_width = width;
+ 	memcpy(htc.join_bssid, bssid, 6);
++	memcpy(htc.join_ssid, ssid, MIN(wl, 32u));             /* 0286 */
++	htc.join_ssid_len = (uint8_t)MIN(wl, 32u);
++	htc.ba_asked = htc.ba_ended = htc.ba_active = 0;        /* 0285 */
++	htc.addba_pending = false;
+ 	htc.peer_mapped = htc.vdev_started = htc.tx_done = htc.auth_rx = htc.assoc_rx = htc.assoc_conf = false;
+ 	htc.lost = false;
+ 	htc.vdev_start_status = htc.auth_status = htc.assoc_status = 0;
+-	printf("SWEET WMI: joining \"%s\" %02x:%02x:%02x:%02x:%02x:%02x on channel %u\n", want, bssid[0], bssid[1],
+-	    bssid[2], bssid[3], bssid[4], bssid[5], ch);
++	printf("SWEET WMI: joining \"%s\" %02x:%02x:%02x:%02x:%02x:%02x on channel %u (%u MHz, %s GHz), %u MHz wide "
++	    "around %u; AP: HT %s, VHT %s, WMM %s\n", want, bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5], ch,
++	    mhz, five ? "5" : "2.4", width, center, e_ht ? "yes" : "no", e_vht ? "yes" : "no", wmm ? "yes" : "no");
+ 
+ 	/* ath11k_peer_create: vdev 0, AP address, type default */
+ 	bzero(b, sizeof(b));
+@@ -1366,7 +1598,11 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	}
+ 	printf("SWEET WMI: peer data setup: routing + 17 REO queues\n");
+ 
+-	/* ath11k_mac_vdev_start for the STA (ath11k_start_vdev_delay): channel of the AP, 11g */
++	/*
++	 * ath11k_mac_vdev_start for the STA (ath11k_start_vdev_delay): channel of the AP. 0249: its mode as ath11k's
++	 * ath11k_phymodes table (HE20_2G 21 at 2.4 GHz; HE20/40/80 16/17/18 at 5 GHz), centre of the whole width;
++	 * sweetwlht=0: 11G (1) / 11A (0) as 0248.
++	 */
+ 	bzero(b, sizeof(b));
+ 	b[0] = WMI_TLV(0x58, 26 * 4);
+ 	b[3] = 100;                     /* beacon interval */
+@@ -1377,8 +1613,12 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	uint32_t *c = b + 27;
+ 	c[0] = WMI_TLV(0x50, 24);
+ 	c[1] = mhz;
+-	c[2] = mhz;
+-	c[4] = 1;                       /* MODE_11G */
++	c[2] = center;
++	c[4] = !wlce_ht_on() ? (five ? 0u : 1u) : !five ? 21u : width == 80 ? 18u : width == 40 ? 17u : 16u;
++	{
++		bool radar;
++		c[4] |= wlce_chan_passive(mhz, &radar) && radar ? 1u << 10 : 0;     /* DFS */
++	}
+ 	c[5] = 40u << 8 | 40u << 16;
+ 	c[6] = 40u << 8;
+ 	b[34] = WMI_TLV(0x12, 0);       /* no NoA descriptors */
+@@ -1421,18 +1661,72 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	f[n++] = (uint8_t)wl;
+ 	memcpy(f + n, ssid, wl);
+ 	n += wl;
+-	f[n++] = 1;
+-	f[n++] = 8;
+-	memcpy(f + n, rates, 8);
+-	n += 8;
+-	f[n++] = 50;
+-	f[n++] = 4;
+-	memcpy(f + n, rates + 8, 4);
+-	n += 4;
++	if (five) {
++		/* 0249: the eight OFDM rates, marked basic where the AP marks them so (mac80211 ieee80211_add_srates_ie) */
++		static const uint8_t ofdm[8] = { 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
++		const uint8_t *e_r = wlce_ie(ap_ies, ap_ielen, 1, 1), *e_x = wlce_ie(ap_ies, ap_ielen, 50, 1);
++		f[n++] = 1;
++		f[n++] = 8;
++		for (unsigned k = 0; k < 8; k++) {
++			bool basic = false;
++			for (unsigned q = 0; e_r != NULL && q < e_r[1]; q++) {
++				basic |= e_r[2 + q] == (0x80 | ofdm[k]);
++			}
++			for (unsigned q = 0; e_x != NULL && q < e_x[1]; q++) {
++				basic |= e_x[2 + q] == (0x80 | ofdm[k]);
++			}
++			f[n++] = (uint8_t)(ofdm[k] | (basic ? 0x80 : 0));
++		}
++	} else {
++		f[n++] = 1;
++		f[n++] = 8;
++		memcpy(f + n, rates, 8);
++		n += 8;
++		f[n++] = 50;
++		f[n++] = 4;
++		memcpy(f + n, rates + 8, 4);
++		n += 4;
++	}
+ 	if (htc.rsn) {
+ 		memcpy(f + n, wlce_rsn_ie, sizeof(wlce_rsn_ie));
+ 		n += sizeof(wlce_rsn_ie);
+ 	}
++	/* 0249: our HT capabilities (26 bytes: info, A-MPDU parameters, MCS set, extended, beamforming, ASEL) */
++	uint16_t own_ht = (uint16_t)(OWN_HT_CAP | (width >= 40 ? OWN_HT_CAP40 : 0));
++	if (ht) {
++		f[n++] = 45;
++		f[n++] = 26;
++		bzero(f + n, 26);
++		f[n] = (uint8_t)own_ht;
++		f[n + 1] = (uint8_t)(own_ht >> 8);
++		f[n + 2] = 0x03;                        /* max A-MPDU 64 KiB, no minimum spacing */
++		f[n + 3] = 0xff;                        /* MCS 0-7 */
++		f[n + 4] = chains >= 2 ? 0xff : 0;      /* MCS 8-15 */
++		f[n + 15] = 0x01;                       /* TX MCS set defined (= the RX set) */
++		n += 26;
++	}
++	/* ... VHT (12 bytes: info, RX MCS map, RX highest, TX MCS map, TX highest) */
++	uint16_t own_map = wlce_vht_map(MIN(chains, 2u));
++	if (vht) {
++		f[n++] = 191;
++		f[n++] = 12;
++		bzero(f + n, 12);
++		f[n] = (uint8_t)OWN_VHT_CAP;
++		f[n + 1] = (uint8_t)(OWN_VHT_CAP >> 8);
++		f[n + 2] = (uint8_t)(OWN_VHT_CAP >> 16);
++		f[n + 3] = (uint8_t)(OWN_VHT_CAP >> 24);
++		f[n + 4] = (uint8_t)own_map;
++		f[n + 5] = (uint8_t)(own_map >> 8);
++		f[n + 8] = (uint8_t)own_map;
++		f[n + 9] = (uint8_t)(own_map >> 8);
++		n += 12;
++	}
++	/* ... and the WMM information element (version 1, no U-APSD), as mac80211 sends to a WMM AP */
++	if (ht) {
++		static const uint8_t wmm_info[9] = { 221, 7, 0x00, 0x50, 0xf2, 2, 0, 1, 0 };
++		memcpy(f + n, wmm_info, sizeof(wmm_info));
++		n += sizeof(wmm_info);
++	}
+ 	if (wmi_mgmt_tx(f, n, 2) != 0) {
+ 		return 7;
+ 	}
+@@ -1442,27 +1736,134 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 		return 8;
+ 	}
+ 
+-	/* ath11k_bss_assoc: peer assoc (legacy), wait for the confirmation */
++	/*
++	 * ath11k_bss_assoc: peer assoc, wait for the confirmation. 0249: ath11k_peer_assoc_prepare's HT, VHT, QoS,
++	 * SMPS and phymode parts, on the AP's capabilities as mac80211 cuts them to ours
++	 * (ieee80211_ht_cap_ie_to_sta_ht_cap / _vht_cap_ie_to_sta_vht_cap). Legacy rates: CCK + OFDM at 2.4 GHz,
++	 * OFDM at 5 GHz (rate in 500 kbit/s, bit 7 = CCK, ath11k_mac_bitrate_to_rate).
++	 */
++	static const uint8_t rates5[8] = { 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
++	const uint8_t *legacy = five ? rates5 : rates;
++	unsigned nlegacy = five ? 8 : sizeof(rates), nht = 0, nss = 1;
++	uint8_t ht_rates[16];
++	uint32_t flags = htc.rsn ? 0x4u : 0x1u;         /* NEED_PTK_4_WAY (ath11k wmi.c drops AUTH then) / AUTH */
++	uint32_t ht_caps = 0, vht_caps = 0, max_mpdu = 0, density = 0, rate_caps = 0, phymode = five ? 0u : 1u;
++	uint32_t rx_max = 0, rx_mcs = 0, tx_max = 0, tx_mcs = 0;
++	if (ht) {
++		uint16_t apc = (uint16_t)(e_ht[2] | e_ht[3] << 8);
++		/* ours and the AP's: LDPC, 20/40, short GI; its TX STBC against our RX STBC; its SM PS, DSSS/CCK-40, A-MSDU */
++		uint16_t cap = (uint16_t)(apc & own_ht & (0x0001u | 0x0002u | 0x0020u | 0x0040u));
++		cap |= (uint16_t)(apc & 0x0080u);                               /* TX STBC (we receive one stream) */
++		cap |= (uint16_t)(apc & (0x000cu | 0x1000u | 0x0800u));         /* SM power save, DSSS/CCK 40, A-MSDU */
++		unsigned factor = e_ht[4] & 3u, dens = e_ht[4] >> 2 & 7u;
++		flags |= 0x2u | 0x1000u;                                        /* QOS, HT */
++		max_mpdu = (1u << (13 + factor)) - 1;
++		density = dens == 0 ? 0 : dens <= 3 ? 1 : dens == 4 ? 2 : dens == 5 ? 4 : dens == 6 ? 8 : 16;
++		ht_caps = cap & ~(0x0020u | 0x0040u);   /* (ath11k: the firmware takes short GI from rate caps) */
++		rate_caps = 0x08u;                                              /* RC_HT */
++		if (cap & 0x0001u) {
++			flags |= 0x10000u;                                      /* LDPC */
++		}
++		if (width >= 40) {
++			flags |= 0x2000u;                                       /* 40MHZ */
++			rate_caps |= 0x02u;                                     /* RC_CW40 */
++		}
++		if (cap & (0x0020u | 0x0040u)) {
++			rate_caps |= 0x04u;                                     /* RC_SGI */
++		}
++		if (cap & 0x0080u) {
++			rate_caps |= 0x20u;                                     /* RC_TX_STBC */
++			flags |= 0x8000u;                                       /* STBC */
++		}
++		unsigned smps = cap >> 2 & 3u;
++		flags |= smps == 0 ? 0x40000u : smps == 1 ? 0x20000u : smps == 3 ? 0x200000u : 0;      /* STATIC/DYN/MUX */
++		for (unsigned k = 0; k < 8 * MIN(chains, 2u); k++) {
++			if (e_ht[5 + k / 8] & (1u << (k % 8))) {
++				ht_rates[nht++] = (uint8_t)k;
++				nss = MAX(nss, k / 8 + 1);
++			}
++		}
++		if (nht == 0) {                 /* (ath11k: MCS 0-7 are mandatory; the firmware asserts on none) */
++			for (; nht < 8; nht++) {
++				ht_rates[nht] = (uint8_t)nht;
++			}
++		}
++		if (e_ht[6] != 0 && chains >= 2) {
++			rate_caps |= 0x01u;                                     /* RC_DS */
++		}
++		phymode = five ? (width >= 40 ? 6u : 4u) : 5u;                  /* 11NA_HT40 / 11NA_HT20 / 11NG_HT20 */
++	}
++	if (vht) {
++		uint32_t apv = (uint32_t)e_vht[2] | (uint32_t)e_vht[3] << 8 | (uint32_t)e_vht[4] << 16 | (uint32_t)e_vht[5] << 24;
++		uint16_t ap_rx = (uint16_t)(e_vht[6] | e_vht[7] << 8), ap_tx = (uint16_t)(e_vht[10] | e_vht[11] << 8);
++		/* ours and the AP's: RX LDPC, short GI 80; its TX STBC against our RX STBC; its MPDU length, A-MPDU exponent */
++		vht_caps = apv & OWN_VHT_CAP & (0x10u | 0x20u);
++		vht_caps |= apv & (0x80u | 0x3u | 7u << 23);
++		flags |= 0x02000000u;                                           /* VHT */
++		if (width == 80) {
++			flags |= 0x04000000u;                                   /* 80MHZ */
++		}
++		max_mpdu = MAX(max_mpdu, (1u << (13 + (apv >> 23 & 7u))) - 1);
++		rx_mcs = wlce_vht_min(ap_rx, own_map);                          /* what it receives: as much as we send */
++		tx_mcs = wlce_vht_min(ap_tx, own_map);
++		tx_mcs = (tx_mcs & ~0x00ff0000u) | 1u << 24;                    /* no VHT MCS 10/11 (ath11k) */
++		rx_max = (uint32_t)(e_vht[8] | e_vht[9] << 8) & 0x1fffu;
++		tx_max = (uint32_t)(e_vht[12] | e_vht[13] << 8) & 0x1fffu;
++		unsigned vn = 0;
++		for (unsigned k = 0; k < 8; k++) {
++			if ((rx_mcs >> (2 * k) & 3u) != 3u) {
++				vn = k + 1;
++			}
++		}
++		nss = MAX(1u, MIN(vn, MIN(chains, 2u)));
++		phymode = width == 80 ? 10u : width == 40 ? 9u : 8u;            /* 11AC_VHT80 / 40 / 20 */
++	}
++	nss = MIN(nss, MAX(1u, MIN(chains, 2u)));
++	htc.join_phymode = phymode;
+ 	bzero(b, sizeof(b));
+ 	b[0] = WMI_TLV(0x65, 40 * 4);
+ 	memcpy(&b[1], bssid, 6);
+ 	b[3] = 0;                       /* vdev */
+ 	b[4] = 1;                       /* new assoc */
+ 	b[5] = htc.aid;
+-	b[6] = htc.rsn ? 0x4u : 0x1u;   /* WMI_PEER_NEED_PTK_4_WAY (ath11k wmi.c drops AUTH then) / WMI_PEER_AUTH */
++	b[6] = flags;
+ 	b[7] = htc.ap_caps;
+ 	b[8] = 1;                       /* listen interval */
+-	b[13] = 1;                      /* nss */
+-	b[15] = 1;                      /* MODE_11G */
+-	b[18] = sizeof(rates);          /* legacy rates */
++	b[9] = ht_caps;
++	b[10] = max_mpdu;
++	b[11] = density;
++	b[12] = rate_caps;
++	b[13] = nss;
++	b[14] = vht_caps;
++	b[15] = phymode;
++	b[18] = nlegacy;                /* legacy rates */
++	b[19] = ht ? nht : 0;           /* HT rates (MCS indices) */
+ 	uint32_t *p = b + 41;
+-	*p++ = WMI_TLV(0x11, sizeof(rates));
+-	memcpy(p, rates, sizeof(rates));
+-	p += sizeof(rates) / 4;
+-	*p++ = WMI_TLV(0x11, 0);        /* no HT rates */
+-	*p++ = WMI_TLV(0x66, 5 * 4);    /* VHT rate set: unused */
++	*p++ = WMI_TLV(0x11, (nlegacy + 3) & ~3u);
++	bzero(p, (nlegacy + 3) & ~3u);
++	memcpy(p, legacy, nlegacy);
++	p += (nlegacy + 3) / 4;
++	if (ht) {
++		*p++ = WMI_TLV(0x11, (nht + 3) & ~3u);
++		bzero(p, (nht + 3) & ~3u);
++		memcpy(p, ht_rates, nht);
++		p += (nht + 3) / 4;
++	} else {
++		*p++ = WMI_TLV(0x11, 0);        /* no HT rates */
++	}
++	*p++ = WMI_TLV(0x66, 5 * 4);    /* VHT rate set: rx max rate, rx MCS map, tx max rate, tx MCS map, tx max MCS/NSS */
++	p[0] = rx_max;
++	p[1] = vht ? rx_mcs : 0;
++	p[2] = tx_max;
++	p[3] = vht ? tx_mcs : 0;
++	p[4] = 0;
+ 	p += 5;
+ 	*p++ = WMI_TLV(0x12, 0);        /* no HE rate sets */
++	printf("SWEET WMI: peer assoc: phymode %u (%s), %u MHz, %u stream(s), flags %#x, HT caps %#x (%u MCS), VHT caps %#x, "
++	    "VHT rx map %#x tx map %#x, max A-MPDU %u, rate caps %#x\n", phymode,
++	    phymode == 10 ? "11ac VHT80" : phymode == 9 ? "11ac VHT40" : phymode == 8 ? "11ac VHT20" : phymode == 6 ? "11n HT40" :
++	    phymode == 4 ? "11na HT20" : phymode == 5 ? "11ng HT20" : phymode == 0 ? "11a" : "11g", width, nss, flags, ht_caps,
++	    nht, vht_caps, rx_mcs, tx_mcs, max_mpdu, rate_caps);
+ 	if (wmi_cmd(0x6005u, b, (uint32_t)((uint8_t *)p - (uint8_t *)b), "PEER_ASSOC") != 0) {
+ 		return 9;
+ 	}
+@@ -1581,9 +1982,118 @@ sweet_wlce_poll(void)
+ 		(void)wlce_install_key(true, gtk_idx, gtk, gtk_len, rsc);
+ 		bzero(gtk, sizeof(gtk));
+ 	}
++	/*
++	 * 0249/0285: the AP's ADDBA requests answered (as mac80211 agg-rx.c + ath11k_dp_rx_ampdu_start do;
++	 * idea from hakios lx_80211.c ba_handle: "without this every frame goes on its own"): REO's queue for
++	 * that TID gets the window and the SSN (sweet_wldp_rx_tid_ba), the firmware hears of it
++	 * (REORDER_QUEUE_SETUP with the window), then Block Ack action 1 (ADDBA response) with status 0, the
++	 * TID, immediate policy, A-MSDU as asked and our window; its token and timeout (IEEE 802.11-2016
++	 * 9.6.5.3). Status 37 (declined) as before when REO did not take it or boot-arg sweetwlba=0.
++	 * Window: the AP's (0 = up to us: 64), at most sweetwlba (default 256).
++	 */
++	if (htc.joined && htc.addba_pending) {
++		static uint8_t af[24 + 9];
++		static uint32_t b[10];
++		uint32_t most = 256;
++		(void)PE_parse_boot_argn("sweetwlba", &most, sizeof(most));
++		htc.addba_pending = false;
++		for (unsigned tid = 0; tid < 8; tid++) {
++			if (htc.ba_ended & (1u << tid)) {
++				htc.ba_ended &= (uint8_t)~(1u << tid);
++				if (htc.ba_active & (1u << tid)) {
++					int e = sweet_wldp_rx_tid_ba(tid, 2, -1);
++					htc.ba_active &= (uint8_t)~(1u << tid);
++					printf("SWEET WMI: DELBA from the AP for TID %u: window back to 2: %d\n", tid, e);
++				}
++			}
++			if (!(htc.ba_asked & (1u << tid))) {
++				continue;
++			}
++			htc.ba_asked &= (uint8_t)~(1u << tid);
++			uint16_t ps = (uint16_t)(htc.ba_params[tid][0] | htc.ba_params[tid][1] << 8);
++			unsigned asked = ps >> 6 & 0x3ffu, window = MIN(asked != 0 ? asked : 64u, MIN(most, 256u));
++			int e = window >= 2 ? sweet_wldp_rx_tid_ba(tid, window, htc.ba_ssn[tid]) : EPERM;
++			if (e == 0) {
++				bzero(b, sizeof(b));
++				b[0] = WMI_TLV(0x225, 9 * 4);
++				memcpy(&b[2], htc.join_bssid, 6);
++				b[4] = tid;
++				b[5] = sweet_wldp_rx_tid_pa(tid);
++				b[7] = tid;
++				b[8] = 1;
++				b[9] = window;
++				e = wmi_cmd(0x6013u, b, 10 * 4, "REORDER_QUEUE_SETUP (block ack)");
++			}
++			uint32_t n = mgmt_hdr(af, 0xd0, htc.join_bssid, 3);
++			af[n++] = 3;
++			af[n++] = 1;
++			af[n++] = htc.ba_token[tid];
++			af[n++] = e == 0 ? 0 : 37;
++			af[n++] = 0;
++			uint16_t answer = (uint16_t)((ps & 1u) | 2u | tid << 2 | (e == 0 ? window : asked) << 6);
++			af[n++] = (uint8_t)answer;
++			af[n++] = (uint8_t)(answer >> 8);
++			af[n++] = htc.ba_params[tid][2];
++			af[n++] = htc.ba_params[tid][3];
++			int r = wmi_mgmt_tx(af, n, 3);
++			if (e == 0) {
++				htc.ba_active |= (uint8_t)(1u << tid);
++				htc.ba_window[tid] = (uint16_t)window;
++				htc.ba_sessions++;
++			} else {
++				htc.ba_refused++;
++			}
++			if (htc.ba_sessions + htc.ba_refused <= 12) {
++				printf("SWEET WMI: ADDBA from the AP: TID %u, window %u asked, SSN %u, A-MSDU %u -> %s (window %u, REO/WMI %d, "
++				    "answer sent %d)\n", tid, asked, htc.ba_ssn[tid], ps & 1u, e == 0 ? "ACCEPTED" : "declined",
++				    e == 0 ? window : 0, e, r);
++			}
++		}
++	}
+ 	return 0;
+ }
+ 
++/* 0286: the next scans also ask for this network by name (a hidden one); NULL / 0: no longer */
++void sweet_wlce_scan_name(const uint8_t *ssid, unsigned len);
++void sweet_wlce_scan_channels(const uint16_t *mhz, unsigned count, uint16_t dwell_ms);
++
++void
++sweet_wlce_scan_name(const uint8_t *ssid, unsigned len)
++{
++	wlce_scan_name_len = (uint8_t)MIN(len, 32u);
++	if (ssid != NULL && len != 0) {
++		memcpy(wlce_scan_name, ssid, wlce_scan_name_len);
++	} else {
++		wlce_scan_name_len = 0;
++	}
++}
++
++void
++sweet_wlce_scan_channels(const uint16_t *mhz, unsigned count, uint16_t dwell_ms)
++{
++	unsigned all = wlce_nchan(), n = 0;
++	wlce_scan_dwell = dwell_ms;
++	if (mhz == NULL || count == 0) {
++		wlce_scan_nmhz = 0;
++		return;
++	}
++	for (unsigned i = 0; i < count && n < all; i++) {
++		for (unsigned j = 0; j < all; j++) {
++			if (wlce_chan_mhz[j] == mhz[i]) {
++				bool dup = false;
++				for (unsigned k = 0; k < n; k++) {
++					dup |= wlce_scan_mhz[k] == mhz[i];
++				}
++				if (!dup) {
++					wlce_scan_mhz[n++] = mhz[i];
++				}
++				break;
++			}
++		}
++	}
++	wlce_scan_nmhz = n;
++}
++
+ /* 0 completed, EIO the firmware did not start it, ETIMEDOUT not over in 15 s. */
+ int
+ sweet_wlce_scan(void)
+@@ -1711,6 +2221,13 @@ sweet_wlce_leave(void)
+ 	if (wmi_cmd(0x6002u, b, 4 * 4, "PEER_DELETE") == 0 && !wlce_wait(&htc.peer_deleted, 1000)) {
+ 		printf("SWEET WMI: no peer delete response in 1 s (continuing)\n");
+ 	}
++	/* 0285: no block ack agreement outlives the peer; its REO queues leave REO's cache */
++	htc.ba_asked = htc.ba_ended = htc.ba_active = 0;
++	htc.addba_pending = false;
++	unsigned bad = sweet_wldp_rx_tid_flush();
++	if (bad != 0) {
++		printf("SWEET WMI: %u REO cache flushes did not complete\n", bad);
++	}
+ 	bzero(b, sizeof(b));
+ 	b[0] = WMI_TLV(0x5d, 4);
+ 	htc.vdev_stopped = false;
+@@ -1768,6 +2285,42 @@ sweet_wlce_join(const uint8_t *ssid, unsigned len, const uint8_t *bssid, const u
+ 	}
+ }
+ 
++/*
++ * 0286: after the firmware's beacon-miss or kickout event: a probe request straight to the AP
++ * (mac80211 ieee80211_mgd_probe_ap does the same before it gives a connection up), and how many of
++ * the AP's beacons / probe responses have been heard (an answer moves it).
++ */
++uint32_t sweet_wlce_ap_heard(void);
++int sweet_wlce_probe_ap(void);
++
++uint32_t
++sweet_wlce_ap_heard(void)
++{
++	return htc.ap_heard;
++}
++
++int
++sweet_wlce_probe_ap(void)
++{
++	static uint8_t f[24 + 2 + 32 + 10 + 6];
++	static const uint8_t rates[8] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
++	static const uint8_t ofdm[8] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
++	if (!htc.joined) {
++		return ENOTCONN;
++	}
++	wlce_shared = true;
++	uint32_t n = mgmt_hdr(f, 0x40, htc.join_bssid, 5);
++	f[n++] = 0;
++	f[n++] = htc.join_ssid_len;
++	memcpy(f + n, htc.join_ssid, htc.join_ssid_len);
++	n += htc.join_ssid_len;
++	f[n++] = 1;
++	f[n++] = 8;
++	memcpy(f + n, htc.join_mhz > 4000 ? ofdm : rates, 8);
++	n += 8;
++	return wmi_mgmt_tx(f, n, 3);
++}
++
+ bool
+ sweet_wlce_joined(const uint8_t **bssid)
+ {
+@@ -1792,14 +2345,14 @@ bool
+ sweet_wlce_heard(unsigned index, uint8_t bssid[6], uint8_t ssid[32], uint8_t *ssid_len, uint16_t *mhz, int16_t *rssi,
+     uint16_t *beacon_interval, uint16_t *capability, uint32_t *age_ms, uint8_t *ies, uint16_t *ies_len)
+ {
+-	if (index >= MIN(htc.nbss, 32u)) {
++	if (index >= MIN(htc.nbss, WLCE_BSS_MAX)) {
+ 		return false;
+ 	}
+ 	uint32_t ch = htc.bss_ch[index];
+ 	memcpy(bssid, htc.bss[index], 6);
+ 	memcpy(ssid, htc.bss_ssid[index], 32);
+ 	*ssid_len = htc.bss_ssid_len[index];
+-	*mhz = (uint16_t)(ch == 14 ? 2484 : 2407 + 5 * ch);
++	*mhz = (uint16_t)(ch == 14 ? 2484 : ch < 14 ? 2407 + 5 * ch : 5000 + 5 * ch);
+ 	*rssi = htc.bss_rssi[index];
+ 	*beacon_interval = htc.bss_bint[index];
+ 	*capability = htc.bss_cap[index];
+@@ -1815,6 +2368,22 @@ sweet_wlce_address(uint8_t mac[6])
+ 	memcpy(mac, wlce_mac, 6);
+ }
+ 
++/* 0249: the channels the radio tunes to (for wifid): MHz, listen-only, radar */
++unsigned sweet_wlce_channels(uint16_t *mhz, uint8_t *passive, uint8_t *radar, unsigned most);
++
++unsigned
++sweet_wlce_channels(uint16_t *mhz, uint8_t *passive, uint8_t *radar, unsigned most)
++{
++	unsigned n = MIN(wlce_nchan(), most);
++	for (unsigned i = 0; i < n; i++) {
++		bool r;
++		mhz[i] = wlce_chan_mhz[i];
++		passive[i] = wlce_chan_passive(mhz[i], &r);
++		radar[i] = r;
++	}
++	return n;
++}
++
+ /*
+  * After WLAN_MODE: HTC READY, connect WMI control, SETUP_COMPLETE_EX, the
+  * service-ready events, WMI_INIT, WMI_READY, then the scan. 0 or step 1-17
+diff --git a/bsd/dev/sweet_wldp.c b/bsd/dev/sweet_wldp.c
+index 282d02b..3562901 100644
+--- a/bsd/dev/sweet_wldp.c
++++ b/bsd/dev/sweet_wldp.c
+@@ -13,6 +13,7 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
++#include <kern/clock.h>
+ 
+ extern void sweet_mhi_info(vm_offset_t *bar0, vm_offset_t *mem, uint32_t *mem_pa, uint32_t *er0_rp);
+ extern int sweet_wlfw_ce_mem(vm_offset_t *va, uint32_t *pa, uint32_t *size);
+@@ -641,7 +642,12 @@ sweet_wldp_rx_report(const char *when)
+  */
+ #define M_REO_QDESC     0x4c0000u
+ #define M_TX_BUFS       0x4c8000u
+-#define TX_NBUF         16u
++/*
++ * 0285: 128 transmit buffers (was 16) and a slot is only reused once its completion came back
++ * (cookie = msdu id << 2): 16 were written round-robin whatever was still in flight, so a burst
++ * of more than 16 frames (TCP ACKs of a fast download) could overwrite a frame before its DMA.
++ */
++#define TX_NBUF         128u
+ #define RX_DESC_SZ      384u
+ 
+ int sweet_wldp_rx_tid_qdesc(unsigned tid, uint32_t *pa);
+@@ -654,8 +660,28 @@ static struct {
+ 	uint32_t rx_frames, rx_dropped, rx_logged;
+ 	uint32_t tx_why[8][16];                 /* 0203: completions by release source (TQM 0, FW 3) and reason */
+ 	void (*rx_fn)(const uint8_t *frame, uint32_t len);
++	/* 0249: receive rates (msdu_start info3) by packet type 11a/b/n/ac/ax, the best seen, rate lines logged */
++	uint32_t rx_type[5], rx_best, rx_best_info, rx_rate_logged, rx_amsdu;
++	/* 0285: transmit slots in flight (by msdu id), frames held back because every slot was */
++	uint8_t tx_busy[TX_NBUF];
++	uint32_t tx_full;
+ } dd;
+ 
++/*
++ * 0249: rx_msdu_start_ipq8074 info3 (rx desc +112): pkt type 11:8 (0 11a, 1 11b, 2 11n, 3 11ac, 4 11ax),
++ * STBC 12, GI 14:13, MCS 18:15, bandwidth 20:19 (20/40/80/160), streams = bits of 30:24 (ath11k rx_desc.h,
++ * ath11k_dp_rx_h_rate). Into words: "11ac MCS 9, 2 streams, 80 MHz, short GI".
++ */
++static const char *const rx_pkt[5] = { "11a", "11b", "11n", "11ac", "11ax" };
++
++static void
++wldp_rate_text(uint32_t i3, char *out, size_t size)
++{
++	unsigned type = i3 >> 8 & 0xfu, mcs = i3 >> 15 & 0xfu, bw = i3 >> 19 & 3u, ss = (unsigned)__builtin_popcount(i3 >> 24 & 0x7fu);
++	snprintf(out, size, "%s %s %u, %u stream%s, %u MHz%s", type < 5 ? rx_pkt[type] : "type?", type <= 1 ? "rate" : "MCS", mcs,
++	    ss, ss == 1 ? "" : "s", 20u << bw, (i3 >> 13 & 3u) == 1 ? ", short GI" : "");
++}
++
+ void
+ sweet_wldp_set_rx_handler(void (*fn)(const uint8_t *frame, uint32_t len))
+ {
+@@ -695,6 +721,106 @@ sweet_wldp_rx_tid_qdesc(unsigned tid, uint32_t *pa)
+ 	return 0;
+ }
+ 
++/*
++ * 0285: REO commands (ath11k hal_rx.c ath11k_hal_reo_cmd_send / dp_rx.c), the first ones this driver
++ * sends: an entry of the REO command ring = TLV word (tag 9:1, length 25:10) + command header
++ * (number 15:0, set by dp_reo_cmd_init; status wanted 16) + 8 words. The status comes back on the
++ * REO status ring (TLV, then info0: number 15:0, execution status 27:26, 0 = done). Commands:
++ * UPDATE_RX_REO_QUEUE (0x1a3: queue address, update mask, fields, window / SSN) and FLUSH_CACHE
++ * (0x134: address of a 128-byte descriptor, written back and dropped from REO's cache).
++ * 0, EBUSY ring full, ETIMEDOUT no status in 50 ms, EIO status not 0.
++ */
++static int
++wldp_reo_cmd(uint32_t tag, const uint32_t body[8], bool want_status)
++{
++	struct dpring *r = &dp_rings[9], *st = &dp_rings[10];
++	uint32_t size = r->n * r->esz, next = (r->hp + r->esz) % size;
++	if (dp.mem == 0 || next == *mem32(M_RDP + r->id * 4)) {
++		return EBUSY;
++	}
++	volatile uint32_t *d = mem32(r->off + r->hp * 4);
++	uint32_t num = d[1] & 0xffffu;
++	d[0] = tag << 1 | 36u << 10;
++	d[1] = num | (want_status ? 1u << 16 : 0);
++	for (unsigned i = 0; i < 8; i++) {
++		d[2 + i] = body[i];
++	}
++	__builtin_arm_dsb(0xf);
++	r->hp = next;
++	reg_wr(r->r2, r->hp);
++	if (!want_status) {
++		return 0;
++	}
++	uint32_t ssize = st->n * st->esz;
++	for (unsigned t = 0; t < 500; t++) {
++		uint32_t hp = *mem32(M_RDP + st->id * 4);
++		while (st->hp != hp && hp < ssize) {
++			volatile uint32_t *e = mem32(st->off + st->hp * 4);
++			uint32_t info0 = e[1];
++			st->hp = (st->hp + st->esz) % ssize;
++			reg_wr(st->r2 + 4, st->hp);
++			if ((info0 & 0xffffu) == num) {
++				return (info0 >> 26 & 3u) == 0 ? 0 : EIO;
++			}
++		}
++		delay(100);
++	}
++	return ETIMEDOUT;
++}
++
++/* 0285: where TID tid's REO queue descriptor is (without rewriting it) */
++uint32_t sweet_wldp_rx_tid_pa(unsigned tid);
++
++uint32_t
++sweet_wldp_rx_tid_pa(unsigned tid)
++{
++	return dp.pa + M_REO_QDESC + (tid >= 16 ? 16 * 512 : tid * 512);
++}
++
++/*
++ * 0285: a block ack agreement for TID tid (ath11k_peer_rx_tid_reo_update): REO's window becomes
++ * `window` frames (2..256: the descriptor has the three extension descriptors for 256) and, with
++ * ssn >= 0, the starting sequence number the AP's ADDBA named. Window 2 again when it ends.
++ */
++int sweet_wldp_rx_tid_ba(unsigned tid, unsigned window, int ssn);
++
++int
++sweet_wldp_rx_tid_ba(unsigned tid, unsigned window, int ssn)
++{
++	uint32_t body[8] = { 0 };
++	if (tid > 15) {
++		return EINVAL;
++	}
++	window = MAX(2u, MIN(window, 256u));
++	body[0] = sweet_wldp_rx_tid_pa(tid);
++	body[1] = 1u << 18 | (ssn >= 0 ? 1u << 25 | 1u << 26 : 0);      /* UPD_BA_WINDOW_SIZE, UPD_SVLD + UPD_SSN */
++	body[2] = tid;                                                  /* (queue number, not updated) */
++	body[3] = (window - 1) | (ssn >= 0 ? 1u << 10 | ((uint32_t)ssn & 0xfffu) << 11 : 0);
++	return wldp_reo_cmd(0x1a3u, body, true);
++}
++
++/*
++ * 0285: after the AP's peer is deleted, every TID's queue descriptor leaves REO's cache (ath11k
++ * ath11k_dp_reo_cache_flush: the three extension descriptors, then the queue itself), so the next
++ * join's freshly written descriptors are what REO reads -- not a cached copy that still has the
++ * last network's sequence numbers and window. Number of flushes that did not complete.
++ */
++unsigned sweet_wldp_rx_tid_flush(void);
++
++unsigned
++sweet_wldp_rx_tid_flush(void)
++{
++	unsigned bad = 0;
++	for (unsigned tid = 0; tid <= 16; tid++) {
++		uint32_t pa = sweet_wldp_rx_tid_pa(tid);
++		for (int part = tid == 16 ? 0 : 3; part >= 0; part--) {
++			uint32_t body[8] = { pa + (uint32_t)part * 128u };
++			bad += wldp_reo_cmd(0x134u, body, part == 0) != 0;
++		}
++	}
++	return bad;
++}
++
+ /*
+  * 0145: transmit as NATIVE_WIFI (encap 1), ath11k's default (frame_mode parameter =
+  * NATIVE_WIFI; Ethernet encap is only used with frame_mode=2): mac80211's STA data frame,
+@@ -725,6 +851,38 @@ sweet_wldp_set_bssid(const uint8_t bssid[6])
+ 	memcpy(tx_bssid, bssid, 6);
+ }
+ 
++/* Reap WBM2SW0 transmit completions; returns how many entries were consumed. */
++static unsigned
++wldp_tx_comp_reap(void)
++{
++	struct dpring *c = &dp_rings[5];                /* tx_comp0: host TP kept in ->hp */
++	uint32_t csize = c->n * c->esz, chp = *mem32(M_RDP + c->id * 4);
++	unsigned n = 0;
++	if (dp.mem == 0 || !rx_ready) {
++		return 0;
++	}
++	__builtin_arm_dsb(0xf);
++	while (c->hp != chp && chp < csize) {
++		volatile uint32_t *e = mem32(c->off + c->hp * 4);
++		uint32_t src = e[2] & 7u, reason = (e[2] >> 13) & 0xfu;
++		dd.tx_done++;
++		dd.tx_acked += (src == 0 && reason == 0);
++		dd.tx_why[src][reason]++;
++		/* Free the TX buffer slot regardless of release source (TQM 0, FW 3, etc.) */
++		dd.tx_busy[(e[1] >> 13) % TX_NBUF] = 0;
++		if (dd.tx_logged++ < 6) {
++			printf("SWEET WLDP: tx done: cookie %#x, release source %u, reason %u, raw %08x %08x %08x %08x %08x %08x\n",
++			    e[1] >> 11, src, reason, e[2], e[3], e[4], e[5], e[6], e[7]);
++		}
++		c->hp = (c->hp + c->esz) % csize;
++		n++;
++	}
++	if (n != 0) {
++		reg_wr(c->r2 + 4, c->hp);
++	}
++	return n;
++}
++
+ int
+ sweet_wldp_tx(const void *frame, uint32_t len)
+ {
+@@ -734,10 +892,18 @@ sweet_wldp_tx(const void *frame, uint32_t len)
+ 	if (dp.mem == 0 || len < 14 || len - 14 + 24 + 8 > RXBUF_SZ) {
+ 		return EINVAL;
+ 	}
++	if (next == *mem32(M_RDP + r->id * 4) || dd.tx_busy[dd.tx_id % TX_NBUF] != 0) {
++		(void)wldp_tx_comp_reap();
++	}
+ 	if (next == *mem32(M_RDP + r->id * 4)) {
+ 		return EBUSY;
+ 	}
++	if (dd.tx_busy[dd.tx_id % TX_NBUF] != 0 && --dd.tx_busy[dd.tx_id % TX_NBUF] != 0) {
++		dd.tx_full++;                           /* (a slot whose completion never comes frees itself after 64 tries) */
++		return EBUSY;
++	}
+ 	uint32_t id = dd.tx_id++, slot = id % TX_NBUF, pa = dp.pa + M_TX_BUFS + slot * RXBUF_SZ;
++	dd.tx_busy[slot] = 64;
+ 	uint8_t *w = (uint8_t *)(dp.mem + M_TX_BUFS + slot * RXBUF_SZ);
+ 	bzero(w, 24);
+ 	w[0] = 0x08;                                    /* data */
+@@ -759,12 +925,21 @@ sweet_wldp_tx(const void *frame, uint32_t len)
+ 	d[5] = 1u << 21;                                /* TID_OVERWRITE, TID 0, LMAC 0 */
+ 	d[6] = 0;
+ 	d[7] = 0;
++	__builtin_arm_dsb(0xf);
+ 	r->hp = next;
+ 	reg_wr(r->r2, r->hp);
+ 	dd.tx_sent++;
+ 	return 0;
+ }
+ 
++uint32_t sweet_wldp_tx_done(void);
++
++uint32_t
++sweet_wldp_tx_done(void)
++{
++	return dd.tx_done;
++}
++
+ /* Transmit completions (WBM2SW0) and received frames (REO2SW1-4), then refill. */
+ void
+ sweet_wldp_data_poll(void)
+@@ -772,25 +947,7 @@ sweet_wldp_data_poll(void)
+ 	if (!rx_ready) {
+ 		return;
+ 	}
+-	struct dpring *c = &dp_rings[5];                /* tx_comp0: host TP kept in ->hp */
+-	uint32_t csize = c->n * c->esz, chp = *mem32(M_RDP + c->id * 4);
+-	bool cm = false;
+-	while (c->hp != chp && chp < csize) {
+-		volatile uint32_t *e = mem32(c->off + c->hp * 4);
+-		uint32_t src = e[2] & 7u, reason = (e[2] >> 13) & 0xfu;
+-		dd.tx_done++;
+-		dd.tx_acked += (src == 0 && reason == 0);
+-		dd.tx_why[src][reason]++;
+-		if (dd.tx_logged++ < 6) {
+-			printf("SWEET WLDP: tx done: cookie %#x, release source %u, reason %u, raw %08x %08x %08x %08x %08x %08x\n",
+-			    e[1] >> 11, src, reason, e[2], e[3], e[4], e[5], e[6], e[7]);
+-		}
+-		c->hp = (c->hp + c->esz) % csize;
+-		cm = true;
+-	}
+-	if (cm) {
+-		reg_wr(c->r2 + 4, c->hp);
+-	}
++	(void)wldp_tx_comp_reap();
+ 	struct rxring *rf = &rx_rings[0];
+ 	uint32_t rfsize = rf->n * rf->esz;
+ 	bool refilled = false;
+@@ -798,6 +955,7 @@ sweet_wldp_data_poll(void)
+ 		struct dpring *r = &dp_rings[k];
+ 		uint32_t size = r->n * r->esz, hp = *mem32(M_RDP + r->id * 4);
+ 		bool moved = false;
++		__builtin_arm_dsb(0xf);
+ 		while (r->hp != hp && hp < size) {
+ 			volatile uint32_t *e = mem32(r->off + r->hp * 4);
+ 			uint32_t paddr = e[0], cookie = e[1] >> 11, msdu = e[4], info0 = e[7];
+@@ -810,7 +968,31 @@ sweet_wldp_data_poll(void)
+ 				memcpy(&w100, b + 100, 4);
+ 				memcpy(&w24, b + 24, 4);
+ 				uint32_t len = w96 & 0x3fffu, pad = (w24 >> 26) & 3u, decap = (w100 >> 8) & 3u;
+-				bool ok = push == 1 && (w84 >> 31) && (msdu & 3u) == 3u && RX_DESC_SZ + pad + len <= RXBUF_SZ;
++				/* 0249: every MSDU of an A-MSDU too (first/last bits 1:0 say where it sits); none spanning buffers (2) */
++				bool ok = push == 1 && (w84 >> 31) && !(msdu & 4u) && RX_DESC_SZ + pad + len <= RXBUF_SZ;
++				if (ok && (msdu & 3u) != 3u) {
++					dd.rx_amsdu++;
++				}
++				if (ok && (msdu & 1u)) {        /* (the rate of the MPDU, once) */
++					uint32_t i3;
++					memcpy(&i3, b + 112, 4);
++					unsigned type = i3 >> 8 & 0xfu;
++					uint32_t score = type << 16 | (uint32_t)__builtin_popcount(i3 >> 24 & 0x7fu) << 12 | (i3 >> 19 & 3u) << 8 |
++					    (i3 >> 15 & 0xfu);
++					if (type < 5) {
++						dd.rx_type[type]++;
++					}
++					if (score > dd.rx_best) {
++						dd.rx_best = score;
++						dd.rx_best_info = i3;
++					}
++					if (dd.rx_rate_logged < 12 && (type >= 2 || dd.rx_rate_logged < 3)) {
++						char t[64];
++						dd.rx_rate_logged++;
++						wldp_rate_text(i3, t, sizeof(t));
++						printf("SWEET WLDP: rx rate: %s (info3 %#x, msdu %u bytes)\n", t, i3, len);
++					}
++				}
+ 				if (dd.rx_logged++ < 40) {
+ 					/* destination class and EtherType only (no addresses in the log) */
+ 					const uint8_t *fr = b + RX_DESC_SZ + pad;
+@@ -848,6 +1030,7 @@ sweet_wldp_data_poll(void)
+ 		}
+ 	}
+ 	if (refilled) {
++		__builtin_arm_dsb(0xf);
+ 		*mem32(M_WRP + 0) = rf->hp;
+ 	}
+ }
+@@ -860,6 +1043,12 @@ sweet_wldp_data_report(void)
+ 	printf("SWEET WLDP: data: tx %u sent, %u done, %u acked; rx %u frames, %u dropped; rx release ring hp %u, "
+ 	    "reo exception hp %u\n", dd.tx_sent, dd.tx_done, dd.tx_acked, dd.rx_frames, dd.rx_dropped,
+ 	    *mem32(M_RDP + dp_rings[7].id * 4), *mem32(M_RDP + dp_rings[8].id * 4));
++	if (dd.rx_best_info != 0) {             /* 0249 */
++		char t[64];
++		wldp_rate_text(dd.rx_best_info, t, sizeof(t));
++		printf("SWEET WLDP: rx MPDUs by type: 11a %u, 11b %u, 11n %u, 11ac %u, 11ax %u; A-MSDU parts %u; best: %s\n",
++		    dd.rx_type[0], dd.rx_type[1], dd.rx_type[2], dd.rx_type[3], dd.rx_type[4], dd.rx_amsdu, t);
++	}
+ 	for (unsigned s = 0; s < 8; ++s) {
+ 		for (unsigned r = 0; r < 16; ++r) {
+ 			if (dd.tx_why[s][r] != 0) {
+diff --git a/bsd/dev/sweet_wlsta.c b/bsd/dev/sweet_wlsta.c
+index c4f63c2..08ee6c5 100644
+--- a/bsd/dev/sweet_wlsta.c
++++ b/bsd/dev/sweet_wlsta.c
+@@ -11,7 +11,7 @@
+  *
+  * Open and (0203) WPA2-PSK/CCMP networks: the PMK wifid gives (or one made of a passphrase)
+  * goes to the 4-way handshake (bsd/dev/sweet_wlsec.c), whose EAPOL frames are taken out of the
+- * receive path here. 2.4 GHz channels 1-13 only (sweet_wlce.c's channel list).
++ * receive path here. Channels: sweet_wlce.c's list (0249: 2.4 GHz 1-13 and 5 GHz).
+  *
+  * Locking: every call into sweet_wlce.c holds its lock (sweet_wlce_lock); the waits inside let
+  * go of it while they sleep, so the net thread's poll and transmit go on during a scan or a join.
+@@ -40,9 +40,15 @@ extern uint32_t sweet_wlce_lost(void);
+ extern bool sweet_wlce_heard(unsigned index, uint8_t bssid[6], uint8_t ssid[32], uint8_t *ssid_len, uint16_t *mhz,
+     int16_t *rssi, uint16_t *beacon_interval, uint16_t *capability, uint32_t *age_ms, uint8_t *ies, uint16_t *ies_len);
+ extern void sweet_wlce_address(uint8_t mac[6]);
++extern unsigned sweet_wlce_channels(uint16_t *mhz, uint8_t *passive, uint8_t *radar, unsigned most);
+ extern int sweet_wldp_tx(const void *frame, uint32_t len);
+ extern void sweet_wldp_set_rx_handler(void (*fn)(const uint8_t *frame, uint32_t len));
+ extern void sweet_wldp_data_report(void);
++extern uint32_t sweet_wldp_tx_done(void);
++extern uint32_t sweet_wlce_ap_heard(void);
++extern void sweet_wlce_scan_name(const uint8_t *ssid, unsigned len);
++extern void sweet_wlce_scan_channels(const uint16_t *mhz, unsigned count, uint16_t dwell_ms);
++extern int sweet_wlce_probe_ap(void);
+ bool sweet_wlsta_wanted(void);
+ int sweet_wlsta_start(void);
+ 
+@@ -50,8 +56,11 @@ int sweet_wlsta_start(void);
+ 
+ static struct redwood_sta_bss sta_joined;       /* the network joined (state() reads it on any thread) */
+ static int sta_last_error;
+-static uint64_t sta_last_scan_ms, sta_last_report_ms;
++static uint64_t sta_last_scan_ms, sta_last_report_ms, sta_rssi_ms;
+ static unsigned sta_rx_count;
++/* 0286: when a frame last came, and a beacon loss / kickout being checked (probe sent at, AP heard count then) */
++static uint64_t sta_rx_ms, sta_suspect_ms, sta_probe_ms;
++static uint32_t sta_suspect_why, sta_suspect_heard;
+ 
+ static uint64_t
+ sta_now_ms(void)
+@@ -89,12 +98,18 @@ sta_power(bool on)
+ }
+ 
+ static int
+-sta_scan(__unused const struct redwood_sta_scan *what)
++sta_scan(const struct redwood_sta_scan *what)
+ {
+ 	int r = 0;
+ 	sweet_wlce_lock(true);
+-	if (!sweet_wlce_joined(NULL) || sta_now_ms() - sta_last_scan_ms >= STA_RESCAN_MS) {
++	/* 0286: a scan for a name (hidden network) or specific channels is always done */
++	if (!sweet_wlce_joined(NULL) || sta_now_ms() - sta_last_scan_ms >= STA_RESCAN_MS ||
++	    what->ssid_length != 0 || what->frequency_count != 0) {
++		sweet_wlce_scan_name(what->ssid, MIN(what->ssid_length, 32u));
++		sweet_wlce_scan_channels(what->frequencies, what->frequency_count, what->dwell_ms);
+ 		r = sweet_wlce_scan();
++		sweet_wlce_scan_channels(NULL, 0, 0);
++		sweet_wlce_scan_name(NULL, 0);
+ 		sta_last_scan_ms = sta_now_ms();
+ 	}
+ 	sweet_wlce_lock(false);
+@@ -128,6 +143,7 @@ sta_note_joined(void)
+ 	if (!sweet_wlce_joined(&bssid)) {
+ 		return;
+ 	}
++	sta_last_report_ms = sta_now_ms() - 270000;     /* 0249: the data report (receive rates) 30 s after a join */
+ 	for (unsigned i = 0; sta_entry(i, &b); i++) {
+ 		if (memcmp(b.bssid, bssid, 6) == 0) {
+ 			sta_joined = b;
+@@ -156,7 +172,9 @@ sta_join(const struct redwood_sta_join *what)
+ 	sweet_wlce_lock(true);
+ 	r = sweet_wlce_join(what->ssid, what->ssid_length, bssid, key);
+ 	if (r == ENOENT) {                      /* not in the table (yet): one scan, then again */
++		sweet_wlce_scan_name(what->ssid, MIN(what->ssid_length, 32u));  /* 0286: by name (a hidden network) */
+ 		(void)sweet_wlce_scan();
++		sweet_wlce_scan_name(NULL, 0);
+ 		sta_last_scan_ms = sta_now_ms();
+ 		r = sweet_wlce_join(what->ssid, what->ssid_length, bssid, key);
+ 	}
+@@ -195,13 +213,17 @@ sta_state(struct redwood_sta_state *state)
+ 	state->last_error = sta_last_error;
+ }
+ 
++/* 0249: sweet_wlce.c's list: 2.4 GHz 1-13 and 5 GHz (listen-only / radar ones flagged) */
+ static unsigned
+ sta_channels(struct redwood_sta_channel *channels, unsigned most)
+ {
+-	unsigned n;
+-	for (n = 0; n < most && n < 13; n++) {
+-		channels[n].frequency = (uint16_t)(2412 + 5 * n);
+-		channels[n].flags = 0;
++	uint16_t mhz[64];
++	uint8_t passive[64], radar[64];
++	unsigned n = sweet_wlce_channels(mhz, passive, radar, MIN(most, 64u));
++	for (unsigned i = 0; i < n; i++) {
++		channels[i].frequency = mhz[i];
++		channels[i].flags = (uint16_t)((passive[i] ? REDWOOD_STA_CHANNEL_PASSIVE : 0) |
++		    (radar[i] ? REDWOOD_STA_CHANNEL_RADAR : 0));
+ 	}
+ 	return n;
+ }
+@@ -246,14 +268,63 @@ static unsigned
+ sta_poll(void)
+ {
+ 	unsigned before = sta_rx_count;
++	uint32_t tx_before = sweet_wldp_tx_done();
+ 	uint32_t lost;
++	const uint8_t *bssid;
+ 	sweet_wlce_lock(true);
+ 	(void)sweet_wlce_poll();
+-	if (sweet_wlce_joined(NULL) && sta_now_ms() - sta_last_report_ms >= 300000) {
+-		sta_last_report_ms = sta_now_ms();
+-		sweet_wldp_data_report();       /* 0203: transmit completions by reason, every 5 min while joined */
++	uint64_t now = sta_now_ms();
++	if (sweet_wlce_joined(&bssid)) {
++		if (now - sta_last_report_ms >= 300000) {
++			sta_last_report_ms = now;
++			sweet_wldp_data_report();       /* 0203: transmit completions by reason, every 5 min while joined */
++		}
++		if (now - sta_rssi_ms >= 1000) {
++			static struct redwood_sta_bss b;
++			sta_rssi_ms = now;
++			for (unsigned i = 0; sta_entry(i, &b); i++) {
++				if (memcmp(b.bssid, bssid, 6) == 0) {
++					sta_joined.rssi = b.rssi;
++					break;
++				}
++			}
++		}
+ 	}
+ 	lost = sweet_wlce_lost();
++	/*
++	 * 0286: the firmware's beacon miss (ROAM 0xb001 reason 2) or kickout (0x6001) is not yet a lost link:
++	 * as mac80211 (ieee80211_beacon_loss -> probe the AP) the AP is asked once a second, and only after
++	 * 4 s without its answer, a beacon or any received frame is the link given up. Before 0286 every
++	 * such event dropped the link at once (and nothing joined again).
++	 */
++	if (sta_rx_count != before) {
++		sta_rx_ms = now;
++	}
++	if (lost != 0 && (lost >> 8 == 0xb001u || lost >> 8 == 0x6001u)) {
++		if (sta_suspect_ms == 0) {
++			sta_suspect_ms = sta_probe_ms = now;
++			sta_suspect_why = lost;
++			sta_suspect_heard = sweet_wlce_ap_heard();
++			printf("SWEET WLSTA: %s: asking the AP whether it is still there (last frame %llu ms ago): %d\n",
++			    lost >> 8 == 0x6001u ? "kickout" : "beacon miss", now - sta_rx_ms, sweet_wlce_probe_ap());
++		}
++		lost = 0;
++	}
++	if (sta_suspect_ms != 0 && lost == 0) {
++		if (!sweet_wlce_joined(NULL)) {
++			sta_suspect_ms = 0;
++		} else if (sweet_wlce_ap_heard() != sta_suspect_heard || sta_rx_ms > sta_suspect_ms) {
++			printf("SWEET WLSTA: the AP is still there after %llu ms (%s): link kept\n", now - sta_suspect_ms,
++			    sweet_wlce_ap_heard() != sta_suspect_heard ? "it answered" : "frames came");
++			sta_suspect_ms = 0;
++		} else if (now - sta_suspect_ms >= 4000) {
++			lost = sta_suspect_why;
++			sta_suspect_ms = 0;
++		} else if (now - sta_probe_ms >= 1000) {
++			sta_probe_ms = now;
++			(void)sweet_wlce_probe_ap();
++		}
++	}
+ 	if (lost != 0) {
+ 		(void)sweet_wlce_leave();       /* take peer and vdev down: the next join starts clean */
+ 	}
+@@ -264,7 +335,7 @@ sta_poll(void)
+ 		redwood_net_link_state(false);
+ 		redwood_sta_lost(ECONNRESET);
+ 	}
+-	return sta_rx_count - before;
++	return (sta_rx_count - before) + (sweet_wldp_tx_done() - tx_before);
+ }
+ 
+ static struct redwood_net_link sta_link = {
+-- 
+2.54.0 (Apple Git-157)
+

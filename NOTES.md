@@ -2,6 +2,44 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-12 22:35: Wi-Fi 0285/0286: 5 GHz, HT/VHT, Block Ack (REO window 256), adaptive polling, 128-BSS cache, hidden/targeted scans, auto-rejoin & roam**
+  (patches `xnu/patches/0285-umi-wlan-5ghz-vht-ba-throughput.patch`, `xnu/patches/0286-umi-wlan-rejoin-roam-apple80211.patch`;
+  kernel `dc8c28a`; image **`shim/out/umi-0286-wlan.img`** built, **not yet booted on device** — no phone connected in this session,
+  so before/after Mbit/s throughput and live Settings/roam/sleep tests remain to be measured on hardware).
+  - **0285 (`redwood_net.c`, `sweet_wldp.c`, `sweet_wlce.c`, `sweet_wlsta.c`)** — finishes the earlier uncommitted 0249/0285 WIP and fixes data-path bottlenecks:
+    - **5 GHz & HT/VHT:** 38 channels (2.4 GHz 1-13 + 5 GHz 36-165, DFS/passive flagged; `sweetwl5g=0` fallback), 15 dB band preference
+      for 5 GHz above -80 dBm (`sweetwl5gbonus`), HT 20/40 and VHT 20/40/80 in `VDEV_START` / `PEER_ASSOC` / assoc req + WMM (`sweetwlht=0`,
+      `sweetwlwidth=20/40/80`), A-MSDU unwrapping and RX rate logging (`wldp_rate_text`).
+    - **Block Ack & REO:** `wldp_reo_cmd` (`UPDATE_RX_REO_QUEUE` 0x1a3, `FLUSH_CACHE` 0x134), per-TID ADDBA/DELBA handling +
+      `REORDER_QUEUE_SETUP` (0x6013) with window up to 256 (`sweetwlba=0..256`), `wmi_mgmt_tx` 4-slot rotation, and REO cache flush on leave.
+    - **Throughput fixes:** `TX_NBUF` 16 -> 128 with in-flight `tx_busy[]` tracking; fixed `wldp_tx_comp_reap()` to free slots on *any*
+      WBM release source (not only TQM `src == 0`) and reap completions inside `sweet_wldp_tx()` before returning `EBUSY`; added ARM64
+      `dsb(0xf)` barriers around DMA descriptor/ring writes vs MMIO doorbells/pointers; adaptive polling in `redwood_net.c` `net_thread`
+      (up to 4 immediate rounds when `>= 16` frames processed, 250 us sleep while active on RX or TX, 2 ms transition, 10 ms idle —
+      previously slept 2 ms unconditionally and dropped to 10 ms during upload-only bursts); `net_meter` throughput logger (`sweetnetmeter=0`).
+    - **Scan & BSS table:** `WLCE_BSS_MAX` 32 -> 128 with oldest non-joined eviction (previously silently dropped new APs once 32 BSSIDs were
+      heard); targeted channel + dwell scan (`sweet_wlce_scan_channels`) honoring `SCAN_REQ` channel lists; live RSSI refresh every 1 s
+      in `sta_poll()`.
+  - **0286 (`redwood_sta.c`, `redwood_apple80211.c`)** — finishes the uncommitted 0286 reliability work:
+    - Auto-rejoin on involuntary link loss (`redwood_sta_lost`, `sweetwlrejoin=0` off) with exponential backoff (1..30 s), cleared on
+      `ask_leave` (Forget / switch) and `ask_power(false)`; unpins `last_joined.bssid` after `ENOENT` so rejoin can roam to another AP/band
+      of the same saved SSID.
+    - Beacon-miss / kickout probe verification (`sweet_wlce_probe_ap` every 1 s for 4 s before dropping link) and hidden-SSID active probe
+      (`sweet_wlce_scan_name`, zero-byte SSID handling).
+    - `APPLE80211_IOC_AUTH_TYPE` (2) now reports open (1) vs WPA2-PSK (8) based on BSS Privacy capability; `SCANCACHE_CLEAR` (90) answered.
+  - **WPA3-SAE assessment:** deferred — `sweet_bearssl` in `libkern/crypto` does not include P-256 ECC (`ec/`), and iOS 16.7 `wifid`'s
+    `APPLE80211_CAP_*` / `ASSOCIATE` SAE fields cannot be probed without a live device. WPA2/WPA3 transition-mode APs (MFPR=0) continue
+    to join via WPA2-PSK.
+  - **Reference ports reviewed:**
+    - `MakrSas/ios-topaz`: WPA2 from Settings, Keychain persistence, reboot reconnect, HTTPS in Safari (`0123-0130`, `0900`).
+    - `oosexgang/hakios-xnu-kernel` (WCN6750 ath11k, 55-90 Mbit/s): `docs/driver-review/wifi-stack.md` documents TX queue slot reservation,
+      ADDBA/BA handling (`ba_handle`), and bounded IRQ/NAPI budget; `hakios.apple80211.c` shares the `redwood_apple80211` ioctl layout.
+    - `joranv1/ios-sailfish`: `0178-sailfish-wlan-rejoin.patch` (`wl_rejoin` backoff), `0179` Apple80211, `0181` GIC SPI interrupt attach
+      (`sweet_spi_attach` — future interrupt-driven DP candidate).
+    - `NWylynko/ios-flame`: `redwood_*` Apple80211/station/net base + `wland` userspace driver.
+    - `AdyaGMD/ios-spes`, `oosexgang/hakios-mt6768` (`redwood_wpa.c`), `UniXNU/UniXNU-sheng` (`reports/ipados27-wifi-association.md`:
+      1 Hz RSSI refresh, clean disconnect/teardown on switch).
+
 - **2026-11-12 20:55: black widgets - FitnessWidget kept out of Metal; Music / MusicWidgets crash is the media
   library, not the GPU** (no kernel change; phone file changed, user OK'd).
   - FitnessWidget (Activity rings) made a Metal device ~75 times on the 0284 boot: buffers / textures refused

@@ -1,0 +1,189 @@
+From dc8c28a05031e0c0afbe40de4fec2773de454a47 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 22:35:09 +0100
+Subject: [PATCH] umi: wlan (0286): auto-rejoin with exponential backoff +
+ BSSID unpin on ENOENT roam, AUTH_TYPE open/WPA2, SCANCACHE_CLEAR
+
+---
+ bsd/dev/redwood_apple80211.c |  8 ++--
+ bsd/dev/redwood_sta.c        | 76 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 79 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index e2674ee..28c742b 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -436,10 +436,10 @@ get(struct apple80211req *request)
+ 	case 103:                               /* all of it, as a scan's result */
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
+ 		break;
+-	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
++	case 2: {                               /* how it was joined: open system (1) or WPA2 with a passphrase (8) */
+ 		struct {
+ 			uint32_t version, lower, upper, extended;
+-		} answer = { .version = 1, .lower = 1, .upper = 8 };
++		} answer = { .version = 1, .lower = 1, .upper = (state->bss.capability & 0x10) ? 8 : 1 };
+ 
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+ 		break;
+@@ -589,6 +589,8 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+ 	}
+ 	case 10:
+ 		return set_scan(request, said, said_size);
++	case 90:                                /* SCANCACHE_CLEAR */
++		return 0;
+ 	default:
+ 		return EOPNOTSUPP;
+ 	}
+@@ -619,7 +621,7 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+ {
+ 	static unsigned said;
+ 
+-	if (said < 200) {
++	if (said < 200 || event == REDWOOD_STA_LINK || event == REDWOOD_STA_JOIN_DONE) {   /* (umi 0286: joins and links always) */
+ 		said++;
+ 		printf("apple80211: the station says: %s, %d\n", event == REDWOOD_STA_POWER ? "power" : event == REDWOOD_STA_SCAN_DONE ?
+ 		    "a scan is over" : event == REDWOOD_STA_JOIN_DONE ? "a join is over" : "the link", status);
+diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
+index f4e0490..5428c90 100644
+--- a/bsd/dev/redwood_sta.c
++++ b/bsd/dev/redwood_sta.c
+@@ -27,6 +27,8 @@
+ #include <sys/redwood_input.h>
+ #include <sys/redwood_sta.h>
+ #include <sys/systm.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
+ 
+ extern void thread_set_thread_name(thread_t thread, const char *name);
+ 
+@@ -48,6 +50,18 @@ static struct redwood_sta_scan asked_scan_what;
+ static struct redwood_sta_join asked_join_what;
+ static struct redwood_sta_join standing;        /* the network joined whenever the radio comes on (ssid_length 0: none) */
+ static struct redwood_sta_join fallback;        /* ... as it was before a join that has not come through yet */
++/*
++ * umi 0286: the network last joined, joined again by this thread after the link is lost by itself
++ * (the access point gone for a while, out of range, a beacon loss): 1 s after the loss, then 2, 4, 8,
++ * 16 and every 30 s until it works, until somebody asks for something else (wifid's own join, a leave,
++ * the power switch), or for boot-arg sweetwlrejoin=0 never. Before this a lost link stayed lost until a
++ * reboot (2026-11-02). Same idea as ios-sailfish 0178/0179 (wl_rejoin: backoff until wifid asks for
++ * something else); written for this file's thread.
++ */
++static struct redwood_sta_join last_joined;
++static bool rejoin_due;
++static unsigned rejoin_tries;
++static uint64_t rejoin_at;                      /* mach absolute time of the next try */
+ 
+ static struct redwood_sta_bss *heard;           /* by the last scan that came to an end */
+ static unsigned heard_count;
+@@ -76,9 +90,15 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
+ 		bool power = false, power_on = false, leave = false, do_join = false, do_scan = false;
+ 		int error = 0;
+ 
++		bool rejoin = false;
+ 		lck_mtx_lock(&sta_lock);
+-		while (sta_ops == NULL || !(asked_power || asked_leave || asked_join || asked_scan)) {
+-			lck_mtx_sleep(&sta_lock, LCK_SLEEP_DEFAULT, (event_t)&sta_ops, THREAD_UNINT);
++		while (sta_ops == NULL || !(asked_power || asked_leave || asked_join || asked_scan ||
++		    (rejoin_due && mach_absolute_time() >= rejoin_at))) {
++			if (rejoin_due && sta_ops != NULL) {
++				(void)lck_mtx_sleep_deadline(&sta_lock, LCK_SLEEP_DEFAULT, (event_t)&sta_ops, THREAD_UNINT, rejoin_at);
++			} else {
++				lck_mtx_sleep(&sta_lock, LCK_SLEEP_DEFAULT, (event_t)&sta_ops, THREAD_UNINT);
++			}
+ 		}
+ 		ops = sta_ops;
+ 		/* one thing at a time, in the order that makes sense when several wait */
+@@ -94,6 +114,11 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
+ 			join = asked_join_what;
+ 			bzero(&asked_join_what, sizeof(asked_join_what));
+ 			asked_join = false;
++			rejoin_due = false;             /* (somebody asked: their network now) */
++		} else if (!asked_scan && rejoin_due) {
++			do_join = rejoin = true;
++			join = last_joined;
++			rejoin_tries++;
+ 		} else {
+ 			do_scan = true;
+ 			scan = asked_scan_what;
+@@ -125,8 +150,39 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
+ 		} else if (leave) {
+ 			ops->leave();
+ 			redwood_apple80211_event(REDWOOD_STA_LINK, 0);
++		} else if (do_join && rejoin) {
++			error = ops->join(&join);
++			lck_mtx_lock(&sta_lock);
++			if (error == 0 || !rejoin_due) {
++				printf("wifi: rejoin %u of the network last joined: %d%s\n", rejoin_tries, error,
++				    rejoin_due ? "" : " (somebody asked for something else meanwhile)");
++				rejoin_due = false;
++			} else {
++				uint64_t wait;
++				unsigned s = rejoin_tries >= 5 ? 30 : 1u << rejoin_tries;
++				if (error == ENOENT) {
++					/* BSSID may be gone or out of range: allow roaming to any AP with the same SSID */
++					bzero(last_joined.bssid, sizeof(last_joined.bssid));
++				}
++				nanoseconds_to_absolutetime((uint64_t)s * NSEC_PER_SEC, &wait);
++				rejoin_at = mach_absolute_time() + wait;
++				if (rejoin_tries <= 8 || rejoin_tries % 10 == 0) {
++					printf("wifi: rejoin %u of the network last joined: %d, again in %u s\n", rejoin_tries, error, s);
++				}
++			}
++			lck_mtx_unlock(&sta_lock);
++			bzero(&join, sizeof(join));
++			if (error == 0) {
++				redwood_apple80211_event(REDWOOD_STA_JOIN_DONE, 0);
++				redwood_apple80211_event(REDWOOD_STA_LINK, 1);
++			}
+ 		} else if (do_join) {
+ 			error = ops->join(&join);
++			lck_mtx_lock(&sta_lock);
++			if (error == 0) {
++				last_joined = join;     /* 0286: for the rejoin after a loss */
++			}
++			lck_mtx_unlock(&sta_lock);
+ 			bzero(&join, sizeof(join));
+ 			redwood_apple80211_event(REDWOOD_STA_JOIN_DONE, error);
+ 			if (error == 0) {
+@@ -202,7 +258,20 @@ redwood_sta_attach(const struct redwood_sta_ops *ops)
+ void
+ redwood_sta_lost(int error)
+ {
++	uint32_t on = 1;
++	(void)PE_parse_boot_argn("sweetwlrejoin", &on, sizeof(on));
+ 	redwood_apple80211_event(REDWOOD_STA_LINK, error != 0 ? error : ECONNRESET);
++	lck_mtx_lock(&sta_lock);
++	if (on && sta_on && last_joined.ssid_length != 0 && !asked_leave && !asked_join) {
++		uint64_t wait;
++		nanoseconds_to_absolutetime(NSEC_PER_SEC, &wait);
++		rejoin_due = true;
++		rejoin_tries = 0;
++		rejoin_at = mach_absolute_time() + wait;
++		printf("wifi: the link is lost (%d): the network last joined is joined again in 1 s\n", error);
++	}
++	lck_mtx_unlock(&sta_lock);
++	thread_wakeup((event_t)&sta_ops);
+ }
+ 
+ /* ---- who wants a network ------------------------------------------------------------------------------- */
+@@ -243,6 +312,7 @@ redwood_sta_ask_power(bool on)
+ 	asked_power_on = on;
+ 	if (!on) {
+ 		asked_scan = asked_join = asked_leave = false;
++		rejoin_due = false;             /* 0286 (the network stays known: the switch back on may rejoin it via wifid) */
+ 	}
+ 	lck_mtx_unlock(&sta_lock);
+ 	thread_wakeup((event_t)&sta_ops);
+@@ -309,6 +379,8 @@ redwood_sta_ask_leave(void)
+ 	asked_join = false;
+ 	bzero(&asked_join_what, sizeof(asked_join_what));
+ 	bzero(&fallback, sizeof(fallback));
++	rejoin_due = false;                     /* 0286: left when asked (Settings: Forget, another network): no rejoin */
++	bzero(&last_joined, sizeof(last_joined));
+ 	lck_mtx_unlock(&sta_lock);
+ 	thread_wakeup((event_t)&sta_ops);
+ 	return 0;
+-- 
+2.54.0 (Apple Git-157)
+
