@@ -2,6 +2,20 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-12 20:45: 0284 APPS WITH THEIR OWN FRAMEWORKS LAUNCH: NewTerm and PojavLauncher work** (patch
+  `xnu/patches/0284-umi-amfi-dyld-at-paths.patch`; image **`shim/out/umi-0284-atpath.img`** = 0283 + this, the new
+  daily image).
+  - NewTerm died in dyld before main: "Library not loaded: @rpath/NewTermCommon.framework/NewTermCommon ...
+    (security policy does not allow @ path expansion)". PojavLauncher (70 KB main binary; MetalANGLE, gl4es, LWJGL,
+    OpenAL, libpojavexec in Frameworks/) started and ended silently, no crash report.
+  - Cause: dyld asks AMFI (`__mac_syscall("AMFI", 0x5a)`, amfi_check_dyld_policy_self) what it may do for a process;
+    `bsd/kern/sweet_amfi.c` answered only the kern.exec_inject programs (bluetoothd, BlueTool: 0xff) and ENOPOLICY
+    for the rest, so dyld ran every process restricted - no @rpath / @executable_path / @loader_path.
+  - Fix: every other process gets an ordinary app's flags, 0x9 = ALLOW_AT_PATH (0x1) | ALLOW_FALLBACK_PATHS (0x8);
+    the injected programs keep 0xff. Boot-arg `sweetamfidyld=N` sets the flags (0 = the old no-answer).
+  - User: **"they work"** (both). Seen this boot, unrelated and older: the speech synthesizers' SIGABRT
+    (SiriTTSSynthesizer, KonaSynthesizer, MacinTalkAUSP), pkreporter and FitnessWidget SIGKILLed; user reports some
+    widgets turn black on the widget page (open).
 - **2026-11-12 20:35: 0283 VSYNC FIXED-RATE + REFRESH PERIOD: App Library blur partly back, idle redraw gone** (patch
   `xnu/patches/0283-umi-fb-vsync-fixed-rate.patch`; image **`shim/out/umi-0283-vsync.img`** = 0282b's line, the new
   daily image; log: session scratchpad `umi-0283-live.log`).

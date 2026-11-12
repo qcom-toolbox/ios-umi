@@ -1,0 +1,67 @@
+From 795870be5e670f24f14f698730cca49e386fdaba Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:46:51 +0100
+Subject: [PATCH] umi: AMFI (0284): dyld policy answered for every process with
+ an app's rights (@-paths, fallback paths; was: restricted unless
+ kern.exec_inject) - NewTerm and PojavLauncher launch; sweetamfidyld=N
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/kern/sweet_amfi.c | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index d243b75..4494abd 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -379,6 +379,15 @@ static mac_policy_handle_t sweet_sandbox_mac_handle;
+  */
+ #define SWEET_AMFI_OP_DYLD_POLICY   0x5a
+ #define SWEET_AMFI_DYLD_ALLOW_ALL   0xffULL
++/*
++ * (0284) Every other process: what AMFI gives an ordinary signed app - @-paths (@rpath, @executable_path,
++ * @loader_path) and the fallback library paths (dyld's AMFI_DYLD_OUTPUT_ALLOW_AT_PATH 0x1 and
++ * ALLOW_FALLBACK_PATHS 0x8). Without an answer dyld runs every process restricted: "security policy does not
++ * allow @ path expansion", so an app with its own frameworks (NewTerm's @rpath/NewTermCommon.framework,
++ * PojavLauncher's Frameworks/) died in dyld at launch. Boot-arg sweetamfidyld=N sets the flags (0 = no answer).
++ */
++#define SWEET_AMFI_DYLD_APP         0x9ULL
++static uint64_t sweet_amfi_dyld_app = SWEET_AMFI_DYLD_APP;
+ extern bool sweet_exec_inject_names(const char *name);
+ static uint64_t sweet_amfi_state = 0x86;
+ static uint64_t sweet_amfi_ops_seen[4];
+@@ -402,14 +411,20 @@ sweet_amfi_syscall(struct proc *p, int call, user_addr_t arg)
+ 		int error;
+ 
+ 		proc_name(proc_pid(p), name, sizeof(name));
+-		if (!sweet_exec_inject_names(name)) {
+-			return ENOPOLICY;
++		bool injected = sweet_exec_inject_names(name);
++		if (!injected) {
++			if (sweet_amfi_dyld_app == 0) {
++				return ENOPOLICY;
++			}
++			allow = sweet_amfi_dyld_app;
+ 		}
+ 		error = copyin(arg, in_out, sizeof(in_out));
+ 		if (error == 0) {
+ 			error = copyout(&allow, (user_addr_t)in_out[1], sizeof(allow));
+ 		}
+-		printf("SWEET AMFI: dyld policy for %s: everything allowed (kern.exec_inject) -> %d\n", name, error);
++		if (injected) {
++			printf("SWEET AMFI: dyld policy for %s: everything allowed (kern.exec_inject) -> %d\n", name, error);
++		}
+ 		return error;
+ 	}
+ 	return ENOPOLICY;
+@@ -445,6 +460,7 @@ sweet_amfi_policy_register(void)
+ 	printf("SWEET AMFI: platform binary policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ 	(void)PE_parse_boot_argn("sweetamfistate", &sweet_amfi_state, sizeof(sweet_amfi_state));
++	(void)PE_parse_boot_argn("sweetamfidyld", &sweet_amfi_dyld_app, sizeof(sweet_amfi_dyld_app));
+ 	error = mac_policy_register(&sweet_amfi_if_mac_conf, &sweet_amfi_if_mac_handle, NULL);
+ 	printf("SWEET AMFI: \"AMFI\" interface policy %s (%d), boot-arg state %#llx\n",
+ 	    error ? "NOT registered" : "registered", error, sweet_amfi_state);
+-- 
+2.54.0 (Apple Git-157)
+
