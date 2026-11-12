@@ -2,6 +2,47 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-12 20:00: APP LIBRARY BLUR - THE GPU DRAWS WHAT IT IS ASKED; CoreAnimation's own blur offsets collapse to 0
+  within ~8 frames of every opening** (no kernel change; a tracing build of the bridge front end, `phone/metal2/
+  frontend-pass-trace.diff` on NativeBridgeMetalFrontend.mm, booted on 0282b for two captures, then the original plugin
+  put back - see State below).
+  - The trace: while `/var/local/mtl2-trace-on` exists, every render pass whose colour target is under 1.5 M pixels is
+    logged to `/var/local/mtl2-trace.log` (pid/process, render-target size, attachments with load/store/usage, and per
+    draw the pipeline's function names, viewport, scissor, sampled textures and the first 64 bytes of vertex/fragment
+    buffers 0-7); in full-screen passes only the draws that sample one of those targets. Numbers only, no readback.
+    Captures (Mac, not in git): `~/ios-umi-backup/gpu-2026-11-11/traces/trace1-homescreen.log` (6 MB, home screen
+    only) and `trace2.log` (23 MB, App Library opened three times at uptime ~139.5, ~146.7 and ~151.0 s).
+  - **The App Library background chain (backboardd, every frame):** P1 `downsample_4` of the drawable being composed
+    (1125x2436, the same texture the frame's later passes draw into) into a pooled 284x611 target (clear, store), with
+    tap offsets of one source texel (1/1125, 1/2436) - right; P2 `single_pass_blur_3_lph` + `fixed_frag_lph_cph` from
+    that into a second 284x611 (clear, store); then the frame's full-screen pass samples the result (five draws, full
+    scissor, one with scissor 0,180 163-261x465). Some frames use a longer chain (288x615 `narrow_blur_19`, 162x325 /
+    147x310 `narrow_blur_15`), all at matching sizes and texel scales. Geometry, sizes, viewports and scissors agree
+    from pass to pass: nothing is drawn at the wrong size by the bridge or Turnip.
+  - **The fault is in the uniforms CoreAnimation writes for `single_pass_blur_3` (fragment buffer 1, tap offsets):**
+    at each opening they start at ~0.0017 / 0.0008 (half a texel of the 284x611 target) and then fall
+    doubly-exponentially, frame after frame, e.g. 0.001689 -> 0.001183 -> 0.000331 -> 1.68e-5 -> 5.3e-8 -> 9.8e-13
+    -> 9.7e-22 -> 5.5e-39 -> 0 (each value ~ c x the previous one squared), within ~150 ms; the same at all three
+    openings (0.001613 ..., 0.00172 ...). With 0 offsets the blur adds nothing and the result follows the previous
+    frame's pixels - the "decays to black" of 2026-11-04 and the unblurred / partial / flashing backdrop the user
+    sees. These values are computed on the CPU by CoreAnimation: so CA is fed something wrong by our stack that
+    makes its blur-radius / scale evaluation degenerate (a squared feedback). Candidates to check next, in order:
+    what the bridge answers for GPU timing (`GPUStartTime` / `GPUEndTime` from `nmb_command_buffer_gpu_time`,
+    `kernelStartTime` = 0), drawable presented times, and any value CA reads back from a GPU buffer (backdrop
+    statistics) - log what CA asks of the device / command buffer around an opening.
+  - Ruled out by this trace: viewport / scissor / render-area mismatch in the blur chain, wrong pooled-texture sizes,
+    texture recycling inside a frame (the chain's textures are written before they are read), the composite's
+    sampling scale (texel scale 1/284, 1/611 as sent).
+  - **State:** the phone's `SweetMetal2.bundle/SweetMetal2` is the original again (read back, sha256 d21e0263...;
+    copy `SweetMetal2.sweet-pre-trace` stays next to it and in `~/ios-umi-backup/gpu-2026-11-11/`); the tracing build
+    (sha256 c38108bf...) only on the Mac (`xnu-work/work/m2v-bridge-src/out-trace`, source
+    `NativeBridgeMetalFrontend.mm.trace`); `/var/local/mtl2-trace.log` (empty) stays, `mtl2-trace-on` removed. The
+    running boot still has the tracing build loaded until the next reboot. Build line: `xcrun -sdk iphoneos clang++
+    -target arm64-apple-ios16.0 -x objective-c++ -std=c++20 -fobjc-arc -O2 -g -bundle SweetMetal2.mm
+    NativeBridgeMetalFrontend.mm -I. -x none .../m2v-bridge/target/aarch64-apple-ios/release/libnative_metal_bridge.a
+    -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation`, then
+    `strip -x` and `codesign -f -s -`.
+  - Also seen: Signal hit its GPU memory cap this boot (13 refused textures, 5 refused draws: OutOfMemory(Device)).
 - **2026-11-11 23:00: 0282 GPU: THE "2-FRAME LOOP" IS A GPU HANG - the core is now reset and goes on; submits 4x
   cheaper** (patch `xnu/patches/0282-umi-gpu-recovery-fast-submit.patch`, kernel d67c463; image
   **`shim/out/umi-0282b-gpu.img`** = the daily boot line; test image `umi-0282t-hangtest.img` = that line without

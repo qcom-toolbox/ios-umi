@@ -1,0 +1,269 @@
+--- NativeBridgeMetalFrontend.mm.pre-trace	2026-11-11 23:10:02
++++ NativeBridgeMetalFrontend.mm	2026-11-12 19:56:48
+@@ -768,6 +768,7 @@
+ @end
+ @interface NBRenderPipeline : NBObject
+ @property(nonatomic) NmbRenderPipeline *handle;
++@property(nonatomic,copy) NSString *trName;   // trace: "vertex/fragment" function names
+ @end
+ @implementation NBRenderPipeline
+ - (void)dealloc {nmb_render_pipeline_release(_handle);}
+@@ -886,7 +887,72 @@
+ @property(nonatomic,strong) NSMutableDictionary *userDict;
+ - (void)refuse:(NSString *)what;
+ @end
+-@interface NBEncoder : NBObject
++// ---- pass trace (the App Library backdrop): on while /var/local/mtl2-trace-on exists, lines into /var/local/mtl2-trace.log ----
++// Small render targets (under 1.5 M pixels: the blur chain) are traced in full; in bigger passes only the draws that sample one of
++// the last small targets (the composite). Numbers only, no pixel readback.
++static std::mutex gTrLock;
++static std::string gTrText;
++static uint64_t gTrChecked,gTrBytes;
++static bool gTrState;
++static std::atomic<unsigned> gTrPass{0};
++static void *gTrSmall[64];
++static unsigned gTrSmallNext;
++static bool trOn() {
++ const uint64_t now=nowUs();
++ std::lock_guard<std::mutex> lock(gTrLock);
++ if(now-gTrChecked>200000) {
++  gTrChecked=now;
++  const bool on=access("/var/local/mtl2-trace-on",F_OK)==0;
++  if(on && !gTrState)gTrBytes=0;
++  gTrState=on;
++ }
++ return gTrState && gTrBytes<30000000;
++}
++static void trFlushLocked() {
++ if(gTrText.empty())return;
++ // opened per flush: the file can be emptied (removed and made again) between two captures
++ const int fd=open("/var/local/mtl2-trace.log",O_WRONLY|O_APPEND);
++ if(fd>=0){(void)write(fd,gTrText.data(),gTrText.size());close(fd);}
++ gTrBytes+=gTrText.size();gTrText.clear();
++}
++static void trLine(const char *fmt,...) __attribute__((format(printf,1,2)));
++static void trLine(const char *fmt,...) {
++ char buf[900];va_list ap;va_start(ap,fmt);int n=vsnprintf(buf,sizeof(buf)-1,fmt,ap);va_end(ap);
++ if(n<0)return;
++ if(n>(int)sizeof(buf)-2)n=(int)sizeof(buf)-2;
++ buf[n++]='\n';
++ std::lock_guard<std::mutex> lock(gTrLock);
++ gTrText.append(buf,(size_t)n);
++ if(gTrText.size()>32768)trFlushLocked();
++}
++static void trFlush() {std::lock_guard<std::mutex> lock(gTrLock);trFlushLocked();}
++static bool trIsSmall(void *t) {
++ if(!t)return false;
++ std::lock_guard<std::mutex> lock(gTrLock);
++ for(void *x:gTrSmall)if(x==t)return true;
++ return false;
++}
++static void trNoteSmall(void *t) {
++ std::lock_guard<std::mutex> lock(gTrLock);
++ for(void *x:gTrSmall)if(x==t)return;
++ gTrSmall[gTrSmallNext++%64]=t;
++}
++@interface NBEncoder : NBObject {
++ @public
++ int trPass;                      // 0: not traced; > 0: a small-target pass, traced in full; -1: a big pass, draws traced when they sample a small target
++ unsigned trDraws;
++ bool trHeader,trScissorSet;
++ void *trTex[8];
++ uint32_t trTexW[8],trTexH[8];
++ double trViewport[4];
++ uint64_t trScissor[4];
++ NSString *trPipe;
++ void *trC0;uint32_t trC0W,trC0H;
++ const uint8_t *trBuf[2][8];      // [stage - 1][index]: contents + offset of the bound buffer (not retained: read at the draw only)
++ uint64_t trBufLeft[2][8];
++ uint8_t trBytes[2][8][64];       // setVertexBytes / setFragmentBytes: the first 64 bytes
++ uint8_t trBytesLen[2][8];
++}
+ @property(nonatomic) NmbEncoder *handle;
+ @property(nonatomic,strong) NBCommandBuffer *commandBuffer;
+ @property(nonatomic) BOOL refused;
+@@ -916,6 +982,8 @@
+  if(_refused){_refused=NO;return;}
+  NmbEncoder *handle=_handle;_handle=nullptr;
+  if(!handle){[_commandBuffer refuse:@"endEncoding twice"];return;}
++ if(trPass>0){trLine("E P%d draws=%u",trPass,trDraws);trFlush();}
++ else if(trPass<0 && trHeader){trLine("E F draws traced=%u",trDraws);trFlush();}
+  [self check:nmb_encoder_end(handle) what:"endEncoding"];
+ }
+ - (void)insertDebugSignpost:(NSString *)s {(void)s;}
+@@ -932,6 +1000,11 @@
+   [_commandBuffer.resourceOwners addObject:buffer];
+   if([(NBBuffer *)buffer surfaceOwner]){[_commandBuffer.surfaces addObject:buffer];[_commandBuffer.writtenSurfaces addObject:buffer];}
+  }
++ if(trPass && (stage==1 || stage==2) && index<8) {
++  const uint8_t *base=buffer?(const uint8_t *)[(NBBuffer *)buffer contents]:nullptr;
++  const uint64_t length=buffer?[(NBBuffer *)buffer length]:0;
++  trBuf[stage-1][index]=base && offset<length?base+offset:nullptr;trBufLeft[stage-1][index]=base && offset<length?length-offset:0;trBytesLen[stage-1][index]=0;
++ }
+  [self check:nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index) what:"setBuffer"];
+ }
+ - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
+@@ -943,6 +1016,10 @@
+   [_commandBuffer.surfaces addObject:t];
+   const MTLTextureUsage u=t.usage;
+   if(!u || (u&MTLTextureUsageShaderWrite))[_commandBuffer.writtenSurfaces addObject:t];
++ }
++ if(trPass && stage==2 && index<8) {
++  trTex[index]=(__bridge void *)texture;
++  trTexW[index]=texture?(uint32_t)[(NBTexture *)texture descriptor].width:0;trTexH[index]=texture?(uint32_t)[(NBTexture *)texture descriptor].height:0;
+  }
+  [self check:nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index) what:"setTexture"];
+ }
+@@ -954,6 +1031,9 @@
+ }
+ - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
+  if(_refused)return;
++ if(trPass && (stage==1 || stage==2) && index<8 && bytes) {
++  const NSUInteger n=length<64?length:64;memcpy(trBytes[stage-1][index],bytes,n);trBytesLen[stage-1][index]=(uint8_t)n;trBuf[stage-1][index]=nullptr;
++ }
+  [self check:nmb_encoder_set_bytes(_handle,stage,bytes,length,(uint32_t)index) what:"setBytes"];
+ }
+ - (void)fence:(id<MTLFence>)fence stages:(uint64_t)stages update:(bool)update {
+@@ -976,6 +1056,7 @@
+ - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
+ - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
+  if(_refused)return;
++ if(trPass && (stage==1 || stage==2) && index<8)trBuf[stage-1][index]=nullptr;   // the buffer's start is not kept: not shown
+  [self check:nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index) what:"setBufferOffset"];
+ }
+ @end
+@@ -1039,10 +1120,37 @@
+ @interface NBRenderEncoder : NBEncoder
+ @end
+ @implementation NBRenderEncoder
++- (void)trDraw:(const char *)kind prim:(NSUInteger)prim first:(NSUInteger)first count:(NSUInteger)count instances:(NSUInteger)instances {
++ if(trPass<0) {
++  bool samples=false;
++  for(unsigned k=0;k<8;k++)if(trIsSmall(trTex[k]))samples=true;
++  if(!samples)return;
++  if(!trHeader){trHeader=true;trLine("F %d/%s cb=%p c0=%p %ux%u t=%llu (draws that sample a small target)",getpid(),getprogname(),(__bridge void *)self.commandBuffer,trC0,trC0W,trC0H,nowUs()/1000);}
++ }
++ char line[800];int n=0;
++ n+=snprintf(line+n,sizeof(line)-n," D%u %s pipe=%s prim=%lu first=%lu n=%lu inst=%lu vp=%.1f,%.1f %.1fx%.1f",trDraws++,kind,
++   trPipe?trPipe.UTF8String:"?",(unsigned long)prim,(unsigned long)first,(unsigned long)count,(unsigned long)instances,
++   trViewport[0],trViewport[1],trViewport[2],trViewport[3]);
++ if(trScissorSet)n+=snprintf(line+n,sizeof(line)-n," sc=%llu,%llu %llux%llu",trScissor[0],trScissor[1],trScissor[2],trScissor[3]);
++ else n+=snprintf(line+n,sizeof(line)-n," sc=none");
++ for(unsigned k=0;k<8 && n<(int)sizeof(line)-60;k++)
++  if(trTex[k])n+=snprintf(line+n,sizeof(line)-n," t%u=%p %ux%u%s%s",k,trTex[k],trTexW[k],trTexH[k],trIsSmall(trTex[k])?"*":"",trTex[k]==trC0?"(=c0)":"");
++ trLine("%s",line);
++ for(unsigned stage=0;stage<2;stage++)for(unsigned k=0;k<8;k++) {
++  float f[16];unsigned words=0;
++  if(trBytesLen[stage][k]){words=trBytesLen[stage][k]/4;memcpy(f,trBytes[stage][k],words*4);}
++  else if(trBuf[stage][k]){words=trBufLeft[stage][k]>=64?16:(unsigned)(trBufLeft[stage][k]/4);memcpy(f,trBuf[stage][k],words*4);}
++  if(!words)continue;
++  n=snprintf(line,sizeof(line),"   %s%u%s:",stage?"fb":"vb",k,trBytesLen[stage][k]?"(bytes)":"");
++  for(unsigned w=0;w<words && n<(int)sizeof(line)-20;w++)n+=snprintf(line+n,sizeof(line)-n," %.4g",(double)f[w]);
++  trLine("%s",line);
++ }
++}
+ - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
+  if(self.refused)return;
+  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
+  [self.commandBuffer.resourceOwners addObject:state];
++ if(trPass)trPipe=[(NBRenderPipeline *)state trName];
+  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
+ }
+ - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
+@@ -1094,12 +1202,14 @@
+ - (void)setViewport:(MTLViewport)v {
+  if(self.refused)return;
+  const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
++ if(trPass){trViewport[0]=v.originX;trViewport[1]=v.originY;trViewport[2]=v.width;trViewport[3]=v.height;}
+  [self check:nmb_render_set_viewport(self.handle,values) what:"setViewport"];
+ }
+ - (void)setViewports:(const MTLViewport *)v count:(NSUInteger)c {if(v && c)[self setViewport:v[0]];}
+ - (void)setScissorRect:(MTLScissorRect)r {
+  if(self.refused)return;
+  const uint64_t values[4]={r.x,r.y,r.width,r.height};
++ if(trPass){trScissor[0]=r.x;trScissor[1]=r.y;trScissor[2]=r.width;trScissor[3]=r.height;trScissorSet=true;}
+  [self check:nmb_render_set_scissor(self.handle,values) what:"setScissorRect"];
+ }
+ - (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)c {if(r && c)[self setScissorRect:r[0]];}
+@@ -1148,6 +1258,7 @@
+ - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
+  if(self.refused)return;
+  gDraws++;self.commandBuffer->encodedWork.draws++;
++ if(trPass)[self trDraw:"draw" prim:t first:s count:n instances:i];
+  [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
+ }
+ - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i {
+@@ -1162,6 +1273,7 @@
+  if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
+  [self.commandBuffer.resourceOwners addObject:b];
+  gDraws++;self.commandBuffer->encodedWork.draws++;
++ if(trPass)[self trDraw:"indexed" prim:t first:(NSUInteger)v count:n instances:i];
+  [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
+ }
+ - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o
+@@ -1232,6 +1344,10 @@
+ - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
+               toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
+  if(![self textures:NB_OBJECTS(s,d) count:2])return;
++ if(trOn() && (trIsSmall((__bridge void *)s) || trIsSmall((__bridge void *)d)))
++  trLine("B copy %p %lux%lu L%lu @%lu,%lu %lux%lu -> %p %lux%lu L%lu @%lu,%lu",(__bridge void *)s,(unsigned long)s.width,(unsigned long)s.height,
++         (unsigned long)sl,(unsigned long)so.x,(unsigned long)so.y,(unsigned long)z.width,(unsigned long)z.height,(__bridge void *)d,
++         (unsigned long)d.width,(unsigned long)d.height,(unsigned long)dl,(unsigned long)dO.x,(unsigned long)dO.y);
+  if([(NBTexture *)d surface])[self.commandBuffer.writtenSurfaces addObject:d];
+  const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
+  [self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b) what:"copyFromTexture:toTexture:"];
+@@ -1320,6 +1436,7 @@
+ }
+ - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
+  if(![self textures:NB_OBJECTS(t) count:1])return;
++ if(trOn())trLine("B mipmaps %p %lux%lu levels=%lu%s",(__bridge void *)t,(unsigned long)t.width,(unsigned long)t.height,(unsigned long)t.mipmapLevelCount,trIsSmall((__bridge void *)t)?"*":"");
+  if([(NBTexture *)t surface])[self.commandBuffer.writtenSurfaces addObject:t];
+  [self check:nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle]) what:"generateMipmapsForTexture"];
+ }
+@@ -1449,7 +1566,30 @@
+   [_resourceOwners addObject:d.visibilityResultBuffer];
+   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
+  }
+- return [self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
++ NBRenderEncoder *traced=[NBRenderEncoder new];
++ if(trOn()) {
++  id<MTLTexture> c0=d.colorAttachments[0].texture;
++  const uint64_t pixels=c0?(uint64_t)c0.width*c0.height:0;
++  traced->trC0=(__bridge void *)c0;traced->trC0W=c0?(uint32_t)c0.width:0;traced->trC0H=c0?(uint32_t)c0.height:0;
++  if(c0 && pixels<1500000) {
++   traced->trPass=(int)++gTrPass;
++   trLine("P%d %d/%s cb=%p t=%llu rt=%lux%lu layers=%lu",traced->trPass,getpid(),getprogname(),(__bridge void *)self,nowUs()/1000,(unsigned long)d.renderTargetWidth,
++          (unsigned long)d.renderTargetHeight,(unsigned long)d.renderTargetArrayLength);
++   for(unsigned i=0;i<8;i++) {
++    MTLRenderPassColorAttachmentDescriptor *c=d.colorAttachments[i];
++    if(!c.texture)continue;
++    NBTexture *t=(NBTexture *)c.texture;
++    trNoteSmall((__bridge void *)c.texture);
++    trLine(" c%u tex=%p %lux%lu fmt=%lu usage=%#lx levels=%lu level=%lu surface=%d buffer=%d rowBytes=%lu load=%lu store=%lu clear=%.3g,%.3g,%.3g,%.3g",i,
++           (__bridge void *)c.texture,(unsigned long)c.texture.width,(unsigned long)c.texture.height,(unsigned long)c.texture.pixelFormat,
++           (unsigned long)c.texture.usage,(unsigned long)c.texture.mipmapLevelCount,(unsigned long)c.level,t.surface?1:0,t.buffer?1:0,
++           (unsigned long)t.rowBytes,(unsigned long)c.loadAction,(unsigned long)c.storeAction,c.clearColor.red,c.clearColor.green,
++           c.clearColor.blue,c.clearColor.alpha);
++   }
++   if(d.depthAttachment.texture || d.stencilAttachment.texture)trLine(" depth=%p stencil=%p",(__bridge void *)d.depthAttachment.texture,(__bridge void *)d.stencilAttachment.texture);
++  } else traced->trPass=-1;
++ }
++ return [self encoder:traced handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
+ }
+ - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
+ - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
+@@ -2375,7 +2515,13 @@
+  NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,&b->raw,&creation);delete b;gTimePipeline.add(pipelineBegan);
+  if(logJournal)journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),NBCost::now().since(costBegan));
+  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
+- NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
++ NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;
++ {
++  id vf=d.vertexFunction,ff=d.fragmentFunction;
++  state.trName=[NSString stringWithFormat:@"%@/%@",[vf isKindOfClass:[NBFunction class]]?[(NBFunction *)vf name]:@"?",
++                [ff isKindOfClass:[NBFunction class]]?[(NBFunction *)ff name]:@"-"];
++ }
++ return (id<MTLRenderPipelineState>)state;
+ }
+ - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)error {
+  if(d.url && !d.url.isFileURL){if(error)*error=nbError(@"a file URL is required");return nil;}
