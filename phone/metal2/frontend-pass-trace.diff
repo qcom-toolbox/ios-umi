@@ -1,5 +1,5 @@
 --- NativeBridgeMetalFrontend.mm.pre-trace	2026-11-11 23:10:02
-+++ NativeBridgeMetalFrontend.mm	2026-11-12 20:10:36
++++ NativeBridgeMetalFrontend.mm	2026-11-12 20:19:02
 @@ -10,6 +10,7 @@
  #import <Metal/Metal.h>
  #import <IOSurface/IOSurfaceRef.h>
@@ -16,7 +16,7 @@
  @end
  @implementation NBRenderPipeline
  - (void)dealloc {nmb_render_pipeline_release(_handle);}
-@@ -886,7 +888,172 @@
+@@ -886,7 +888,191 @@
  @property(nonatomic,strong) NSMutableDictionary *userDict;
  - (void)refuse:(NSString *)what;
  @end
@@ -31,6 +31,11 @@
 +static std::atomic<unsigned> gTrPass{0};
 +static void *gTrSmall[64];
 +static unsigned gTrSmallNext;
++// (trace 3) the blur's fragment buffer 1 is copied at the draw, then read again at commit and at completion
++struct TrRecheck {void *cb;void *buf;uint64_t off;float atDraw[8];int pass;unsigned draw;};
++static std::mutex gRcLock;
++static std::vector<TrRecheck> gRc;
++static void trRecheck(void *cb,const char *when,bool drop);
 +static void trProbes(bool on);
 +static void prDump();
 +static bool gPrInstalled;
@@ -103,6 +108,18 @@
 + for(auto &p:gPr)if(p.calls){
 +  trLine("S %s %s calls=%llu last=%.6g min=%.6g max=%.6g changes=%llu",class_getName(p.cls),sel_getName(p.sel),p.calls,p.last,p.minv,p.maxv,p.changes);
 +  p.calls=0;p.changes=0;
++ }
++}
++static void trRecheck(void *cb,const char *when,bool drop) {
++ std::lock_guard<std::mutex> lock(gRcLock);
++ for(size_t i=0;i<gRc.size();) {
++  TrRecheck &r=gRc[i];
++  if(r.cb!=cb){i++;continue;}
++  NBBuffer *b=(__bridge NBBuffer *)r.buf;
++  const float *now=(const float *)((const uint8_t *)[b contents]+r.off);
++  trLine("U P%d D%u %s draw: %.4g %.4g %.4g %.4g | %s: %.4g %.4g %.4g %.4g%s",r.pass,r.draw,when,r.atDraw[0],r.atDraw[1],r.atDraw[2],r.atDraw[3],
++         when,now[0],now[1],now[2],now[3],memcmp(now,r.atDraw,32)?"  CHANGED":"");
++  if(drop){CFRelease(r.buf);gRc.erase(gRc.begin()+i);}else i++;
 + }
 +}
 +static void trProbes(bool on) {
@@ -186,11 +203,13 @@
 + uint64_t trBufLeft[2][8];
 + uint8_t trBytes[2][8][64];       // setVertexBytes / setFragmentBytes: the first 64 bytes
 + uint8_t trBytesLen[2][8];
++ void *trBufObj[2][8];            // the NBBuffer bound there (unretained; retained by a recheck record)
++ uint64_t trBufOff[2][8];
 +}
  @property(nonatomic) NmbEncoder *handle;
  @property(nonatomic,strong) NBCommandBuffer *commandBuffer;
  @property(nonatomic) BOOL refused;
-@@ -916,6 +1083,8 @@
+@@ -916,6 +1102,8 @@
   if(_refused){_refused=NO;return;}
   NmbEncoder *handle=_handle;_handle=nullptr;
   if(!handle){[_commandBuffer refuse:@"endEncoding twice"];return;}
@@ -199,19 +218,20 @@
   [self check:nmb_encoder_end(handle) what:"endEncoding"];
  }
  - (void)insertDebugSignpost:(NSString *)s {(void)s;}
-@@ -932,6 +1101,11 @@
+@@ -932,6 +1120,12 @@
    [_commandBuffer.resourceOwners addObject:buffer];
    if([(NBBuffer *)buffer surfaceOwner]){[_commandBuffer.surfaces addObject:buffer];[_commandBuffer.writtenSurfaces addObject:buffer];}
   }
 + if(trPass && (stage==1 || stage==2) && index<8) {
 +  const uint8_t *base=buffer?(const uint8_t *)[(NBBuffer *)buffer contents]:nullptr;
 +  const uint64_t length=buffer?[(NBBuffer *)buffer length]:0;
++  trBufObj[stage-1][index]=(__bridge void *)buffer;trBufOff[stage-1][index]=offset;
 +  trBuf[stage-1][index]=base && offset<length?base+offset:nullptr;trBufLeft[stage-1][index]=base && offset<length?length-offset:0;trBytesLen[stage-1][index]=0;
 + }
   [self check:nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index) what:"setBuffer"];
  }
  - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
-@@ -944,6 +1118,10 @@
+@@ -944,6 +1138,10 @@
    const MTLTextureUsage u=t.usage;
    if(!u || (u&MTLTextureUsageShaderWrite))[_commandBuffer.writtenSurfaces addObject:t];
   }
@@ -222,7 +242,7 @@
   [self check:nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index) what:"setTexture"];
  }
  - (void)sampler:(id<MTLSamplerState>)sampler index:(NSUInteger)index stage:(uint32_t)stage {
-@@ -954,6 +1132,9 @@
+@@ -954,6 +1152,9 @@
  }
  - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
   if(_refused)return;
@@ -232,7 +252,7 @@
   [self check:nmb_encoder_set_bytes(_handle,stage,bytes,length,(uint32_t)index) what:"setBytes"];
  }
  - (void)fence:(id<MTLFence>)fence stages:(uint64_t)stages update:(bool)update {
-@@ -976,6 +1157,7 @@
+@@ -976,6 +1177,7 @@
  - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
  - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
   if(_refused)return;
@@ -240,11 +260,17 @@
   [self check:nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index) what:"setBufferOffset"];
  }
  @end
-@@ -1039,10 +1221,37 @@
+@@ -1039,10 +1241,43 @@
  @interface NBRenderEncoder : NBEncoder
  @end
  @implementation NBRenderEncoder
 +- (void)trDraw:(const char *)kind prim:(NSUInteger)prim first:(NSUInteger)first count:(NSUInteger)count instances:(NSUInteger)instances {
++ if(trPass>0 && trPipe && strstr(trPipe.UTF8String,"single_pass_blur") && trBuf[1][1] && trBufLeft[1][1]>=32 && trBufObj[1][1]) {
++  TrRecheck r={};r.cb=(__bridge void *)self.commandBuffer;r.buf=(void *)CFBridgingRetain((__bridge id)trBufObj[1][1]);r.off=trBufOff[1][1];
++  memcpy(r.atDraw,trBuf[1][1],32);r.pass=trPass;r.draw=trDraws;
++  std::lock_guard<std::mutex> lock(gRcLock);
++  if(gRc.size()<64)gRc.push_back(r);else CFRelease(r.buf);
++ }
 + if(trPass<0) {
 +  bool samples=false;
 +  for(unsigned k=0;k<8;k++)if(trIsSmall(trTex[k]))samples=true;
@@ -278,7 +304,7 @@
   [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
  }
  - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
-@@ -1094,12 +1303,14 @@
+@@ -1094,12 +1329,14 @@
  - (void)setViewport:(MTLViewport)v {
   if(self.refused)return;
   const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
@@ -293,7 +319,7 @@
   [self check:nmb_render_set_scissor(self.handle,values) what:"setScissorRect"];
  }
  - (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)c {if(r && c)[self setScissorRect:r[0]];}
-@@ -1148,6 +1359,7 @@
+@@ -1148,6 +1385,7 @@
  - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
   if(self.refused)return;
   gDraws++;self.commandBuffer->encodedWork.draws++;
@@ -301,7 +327,7 @@
   [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
  }
  - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i {
-@@ -1162,6 +1374,7 @@
+@@ -1162,6 +1400,7 @@
   if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
   [self.commandBuffer.resourceOwners addObject:b];
   gDraws++;self.commandBuffer->encodedWork.draws++;
@@ -309,7 +335,7 @@
   [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
  }
  - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o
-@@ -1232,6 +1445,10 @@
+@@ -1232,6 +1471,10 @@
  - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
                toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
   if(![self textures:NB_OBJECTS(s,d) count:2])return;
@@ -320,7 +346,7 @@
   if([(NBTexture *)d surface])[self.commandBuffer.writtenSurfaces addObject:d];
   const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
   [self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b) what:"copyFromTexture:toTexture:"];
-@@ -1320,6 +1537,7 @@
+@@ -1320,6 +1563,7 @@
  }
  - (void)generateMipmapsForTexture:(id<MTLTexture>)t {
   if(![self textures:NB_OBJECTS(t) count:1])return;
@@ -328,7 +354,7 @@
   if([(NBTexture *)t surface])[self.commandBuffer.writtenSurfaces addObject:t];
   [self check:nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle]) what:"generateMipmapsForTexture"];
  }
-@@ -1449,7 +1667,30 @@
+@@ -1449,7 +1693,30 @@
    [_resourceOwners addObject:d.visibilityResultBuffer];
    pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
   }
@@ -360,7 +386,23 @@
  }
  - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
  - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
-@@ -2375,7 +2616,13 @@
+@@ -1489,6 +1756,7 @@
+ }
+ // After completion (or a refusal): invalidate the CPU's view of GPU-written imported surfaces, then completed handlers, once.
+ - (void)finish {
++ trRecheck((__bridge void *)self,"done",true);
+  if(!self.failedLocally)flushSurfaces(_writtenSurfaces);
+  // Actual GPU completion (or a local refusal that never submitted) is the
+  // release point. A retained completed command must not pin every old frame.
+@@ -1508,6 +1776,7 @@
+  if(queue)dispatch_async(queue,run);else run();
+ }
+ - (void)commit {
++ trRecheck((__bridge void *)self,"commit",false);
+  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
+  self.committed=YES;
+  self.committedUs=nowUs();
+@@ -2375,7 +2644,13 @@
   NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,&b->raw,&creation);delete b;gTimePipeline.add(pipelineBegan);
   if(logJournal)journalRenderPipeline(d,pipelineBegan,handle?nullptr:nmb_last_error(),NBCost::now().since(costBegan));
   if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);

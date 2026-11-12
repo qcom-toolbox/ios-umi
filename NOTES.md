@@ -48,6 +48,21 @@
     frame), e.g. through a value it derives from the previous frame's GPU output via shared memory.
     Capture: `~/ios-umi-backup/gpu-2026-11-11/traces/trace3-getters.log`. The original plugin is back on the phone
     (read back, sha256 d21e0263...); the running boot keeps the probe build until the next reboot.
+  - **Third capture (20:25, uniforms re-read; same diff):** for every `single_pass_blur` draw the first 32 bytes of
+    fragment buffer 1 are copied at the draw call, then read again at commit and at GPU completion: **158 re-reads,
+    0 changed.** The collapsing offsets (0.001454 -> 0.000635 -> 6.6e-5 -> 6.4e-7 -> 8.4e-11 -> 2.2e-18 -> 2.3e-33 ->
+    0; and 0.001053 -> 9.8e-6 -> 2.4e-13 -> 2.6e-40 -> 0) are exactly what CoreAnimation wrote and what the GPU read.
+    **So the App Library blur is decided above the GPU stack:** CoreAnimation is told a blur radius that collapses to 0
+    within ~8 frames of each opening (and starts at only ~0.5 texel at 1/4 scale, where iOS animates it UP to a large
+    radius), and the GPU then correctly draws "no blur" - which shows the previous frame's pixels (the flashing,
+    unblurred, partial background). Nothing in the bridge's answers drives it (second capture). The radius comes from
+    the layer tree SpringBoard commits (the App Library's background material / zoom-blur animation), so the next
+    suspects are on that side: the animation clock SpringBoard and backboardd run on - our display link is a 60 Hz
+    IOTimerEventSource re-armed after each tick (SweetFramebuffer vsyncFired, notification 5 with mach time) rather
+    than the panel's real vsync - and any SpringBoard / UIKit spring animation integrated with that frame timing; then
+    whether the same blur works with Metal off for SpringBoard (CPU / software path) to split SpringBoard state from
+    rendering. Capture: `~/ios-umi-backup/gpu-2026-11-11/traces/trace4-recheck.log`; original plugin back on the phone
+    (read back, sha256 d21e0263...).
   - Ruled out by this trace: viewport / scissor / render-area mismatch in the blur chain, wrong pooled-texture sizes,
     texture recycling inside a frame (the chain's textures are written before they are read), the composite's
     sampling scale (texel scale 1/284, 1/611 as sent).
