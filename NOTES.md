@@ -4,7 +4,12 @@
 
 - **2026-11-14: keychain 0289: 0288 panicked on its first boot; the wrap key now comes from socinfo** (patch
   `xnu/patches/0289-umi-keychain-socinfo-key.patch`, kernel 8be4abe, image **`shim/out/umi-0289-keychain.img`** =
-  0286's line; booted 11:4x, result pending).
+  0286's line).
+  - **0289 booted 2026-11-14 11:38, no panic (user: "it's up").** Log: `SWEET AKS: keychain wrap: AES-256 key wrap
+    under a key of this chip's identity; old items still open`; in the first ~2 min securityd made 16 wraps (32 -> 40
+    bytes) and 105 unwraps (40 -> 32), every one answered 0: items saved in the old form open, new ones are written
+    in the new form. So the fuse-row read was 0288's panic. Still to check: Wi-Fi joins the saved network by itself,
+    Bluetooth pairings, and a network saved on 0289 after a reboot.
   - **0288 (`umi-0288-keychain.img`): kernel panic early in boot, phone rebooted (user); no log** (the USB Ethernet
     address was not set yet, no photo). Cause not proven. Suspect: 0288's only new early hardware access, the
     word-by-word read of QFPROM 0x784000-0x786fff for the wrap key at securityd's first kAKSWrapKey (the GPU code
