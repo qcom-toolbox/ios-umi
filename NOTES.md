@@ -21,6 +21,11 @@
     the 5-minute data report. A boot-time `no key (open) -> 22` = the password was not on the disk; `PMK -> 80` = the
     key was turned down; `-> 60` = timeout.
   - Test: boot 0290, join once (password typed), wait a minute, reset, boot 0290 again: does it join by itself?
+  - **0290 booted 2026-11-14 11:50; user: "Yes, joined" (Wi-Fi joined by itself).** Not confirmed from a log: the USB
+    log of that boot stops at 11:51, before Wi-Fi came up, and it holds a single 0290 boot - so this may be the first
+    0290 boot joining without the password typed (then the saved password was on the disk all along and the
+    boot-time handshake verdict / retry was the cause) or a second boot the user started. The join history lines
+    (`SWEET WLSTA: join N at T s after boot ...`) will tell once `umi-usbnet.sh` has been run on that boot.
 
 - **2026-11-14 11:45: Wi-Fi on 0289, first log of a join: VHT80, 2 streams, block ack accepted; auto-join works after
   the Wi-Fi switch, not after a reboot (open)**
