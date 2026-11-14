@@ -2,6 +2,17 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 14:20: 0294's off / on blip: wifid answered it (sets POWER on) but still no join; status bar Wi-Fi
+  icon greyed while joined at ~280 Mbit/s (user); 0295 gives wifid a noise floor and SNR** (patch
+  `xnu/patches/0295-umi-wlan-noise-snr.patch`, image **`shim/out/umi-0295-wifi-noise.img`**, built, not booted).
+  - 0294 log: `the radio said off and on again for wifid`, then `wifid sets 19 (POWER) (power: on)` 27 times and
+    POWER read 200 times; scans, no ASSOCIATE. User: "still not working"; and "in the status bar the Wi-Fi icon is
+    greyed when I can obviously reach 280 Mbit/s through Wi-Fi".
+  - Found: every scan result and CURRENT_NETWORK said noise_known 0, noise 0, SNR 0; NOISE (17) was refused, the
+    link event had no SNR / noise. wifid rates candidates (auto-join) and draws the bars from RSSI / SNR: an SNR of
+    0 dB is "unusable", which fits both "auto-join never picks it" and "greyed icon"; a tap skips the rating.
+    0295: noise -95 dBm (the QCA6390 reports SNR; our RSSI is SNR - 95), SNR = RSSI + 95, NOISE answered.
+
 - **2026-11-14 14:05: 0293 boot: en0 waited for the clock and still no auto-join; 0294 makes the radio say off / on
   once after a boot** (patch `xnu/patches/0294-umi-wlan-boot-power-blip.patch`, image
   **`shim/out/umi-0294-wifi-blip.img`**, built, not booted).

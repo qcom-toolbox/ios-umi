@@ -1,0 +1,69 @@
+From cc5822f6bc1105228c0c1c975267863c5e576434 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:17:02 +0100
+Subject: [PATCH] umi: wlan (0295): noise floor (-95 dBm) and SNR in scan
+ results, the current network and link events, NOISE (17) answered - they were
+ 0 / 'not known'
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/redwood_apple80211.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 505278d..3804035 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -133,6 +133,8 @@ struct apple80211_scan_request {
+ 	uint32_t short_ssid, unused_3;
+ };
+ 
++#define REDWOOD_NOISE_DBM       (-95)  /* umi 0295 */
++
+ /* SCAN_RESULT (11) and CURRENT_NETWORK (103): 1164 bytes */
+ struct apple80211_scan_result {
+ 	uint32_t version;
+@@ -260,6 +262,14 @@ give_network(const struct apple80211req *request, const struct redwood_sta_bss *
+ 	result->version = 1;
+ 	channel_fill(&result->channel, bss->frequency, 0);
+ 	result->rssi = bss->rssi;
++	/*
++	 * umi 0295: the noise floor and the signal-to-noise ratio (were 0, "noise not known": rssi - 0 is a
++	 * hopeless SNR). The QCA6390 reports SNR, the RSSI is SNR - 95 (sweet_wlce.c, as ath11k), so the floor
++	 * is -95 dBm and the SNR rssi + 95. wifid rates networks (and draws the status bar's bars) from these.
++	 */
++	result->noise_known = 1;
++	result->noise = REDWOOD_NOISE_DBM;
++	result->snr = (int16_t)(bss->rssi - REDWOOD_NOISE_DBM > 0 ? bss->rssi - REDWOOD_NOISE_DBM : 0);
+ 	result->beacon_interval = bss->beacon_interval;
+ 	result->capability = bss->capability;
+ 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
+@@ -434,6 +444,16 @@ get(struct apple80211req *request)
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+ 		break;
+ 	}
++	case 17: {                              /* umi 0295: the noise floor, in the RSSI answer's shape */
++		struct {
++			uint32_t version, radios, unit;
++			int32_t each[4], all, each_ext[4], all_ext;
++		} answer = { .version = 1, .radios = 1, .each = { REDWOOD_NOISE_DBM }, .all = REDWOOD_NOISE_DBM,
++			     .each_ext = { REDWOOD_NOISE_DBM }, .all_ext = REDWOOD_NOISE_DBM };
++
++		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
++		break;
++	}
+ 	case 103:                               /* all of it, as a scan's result */
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
+ 		break;
+@@ -669,6 +689,8 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+ 		if (state != NULL) {
+ 			redwood_sta_state(state);
+ 			link.rssi = status == 1 ? state->bss.rssi : 0;
++			link.noise = (uint16_t)(int16_t)REDWOOD_NOISE_DBM;       /* umi 0295 */
++			link.snr = (uint16_t)(status == 1 && state->bss.rssi > REDWOOD_NOISE_DBM ? state->bss.rssi - REDWOOD_NOISE_DBM : 0);
+ 			kfree_data(state, sizeof(*state));
+ 		}
+ 		post(EVENT_SSID_CHANGED, NULL, 0);
+-- 
+2.54.0 (Apple Git-157)
+
