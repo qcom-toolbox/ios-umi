@@ -2,6 +2,26 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: Wi-Fi 0290: for "after a reboot the saved network is tried, fails, and the password must be typed
+  again"** (patch `xnu/patches/0290-umi-wlan-sync-after-join-eauth.patch`, kernel = 0289 + this; image
+  **`shim/out/umi-0290-wifi-reboot.img`** = 0286's line; built, not booted).
+  - User (0289): after every reboot the phone tries the saved network and fails; only Forget + the password typed
+    again joins it. Wi-Fi off / on in the same boot rejoins fine. No log of a boot-time join exists (USB log down).
+  - Two causes fit, both addressed:
+    - **Nothing syncs before a reset.** The phone is reset from its buttons; what wifid / securityd wrote after a
+      join (known network, keychain item) can still be in memory. Now a kernel thread calls `sync()` 8 s after every
+      successful join and every 30 s (`sweetsync=0` off; started with en0).
+    - **A handshake timeout counted as "wrong password".** `wlce_secure` returned EAUTH whenever message 1 had come
+      and the handshake was not done in 8 s; Apple80211 turns EAUTH into "invalid PMK" (21), after which wifid stops
+      joining the network by itself and wants the password again. Now EAUTH only if the AP repeated message 1, a MIC
+      check of ours failed, or the AP deauthenticated / disassociated us after message 1; else ETIMEDOUT, and the
+      same access point is tried once more when the name has no other.
+  - To find out which it is even with the USB log down at boot: `SWEET WLSTA: join N at T s after boot: no key (open)
+    / passphrase as typed / key from wifid (PMK) -> errno` for the last 8 joins, printed again at every join and with
+    the 5-minute data report. A boot-time `no key (open) -> 22` = the password was not on the disk; `PMK -> 80` = the
+    key was turned down; `-> 60` = timeout.
+  - Test: boot 0290, join once (password typed), wait a minute, reset, boot 0290 again: does it join by itself?
+
 - **2026-11-14 11:45: Wi-Fi on 0289, first log of a join: VHT80, 2 streams, block ack accepted; auto-join works after
   the Wi-Fi switch, not after a reboot (open)**
   - Log (scratchpad umi-0286-live.log, not in git): join on channel 40 (5200 MHz), 80 MHz around 5210, `peer assoc:

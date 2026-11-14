@@ -1,0 +1,204 @@
+From 353f9c9aeb1905e62d30f560b35dcd8c3b9c03fa Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:50:05 +0100
+Subject: [PATCH] umi: wlan (0290): file systems synced 8 s after a join and
+ every 30 s (sweetsync=0 off); 'wrong password' only when the AP turned the
+ key down (message 1 repeated or a deauth), a silent handshake is a timeout
+ and the same AP is tried once more; the last 8 joins are said again with each
+ join and data report
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_wlce.c  | 24 ++++++++++++++---
+ bsd/dev/sweet_wlsec.c | 13 +++++++++
+ bsd/dev/sweet_wlsta.c | 61 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 95 insertions(+), 3 deletions(-)
+
+diff --git a/bsd/dev/sweet_wlce.c b/bsd/dev/sweet_wlce.c
+index 159910e..f011843 100644
+--- a/bsd/dev/sweet_wlce.c
++++ b/bsd/dev/sweet_wlce.c
+@@ -41,6 +41,7 @@ extern void sweet_wldp_set_encrypt(unsigned type);
+ extern void sweet_wlsec_begin(const uint8_t pmk[32], const uint8_t aa[6], const uint8_t spa[6], const uint8_t *ie, unsigned ie_len);
+ extern void sweet_wlsec_end(void);
+ extern int sweet_wlsec_state(void);
++extern bool sweet_wlsec_refused(void);
+ extern void sweet_wlsec_keys(uint8_t tk[16], uint8_t gtk[32], unsigned *gtk_len, unsigned *gtk_idx, uint8_t rsc[8]);
+ extern bool sweet_wlsec_new_gtk(uint8_t gtk[32], unsigned *gtk_len, unsigned *gtk_idx, uint8_t rsc[8]);
+ extern int sweet_wlsta_start(void);
+@@ -2172,9 +2173,17 @@ wlce_secure(void)
+ 		wlce_tick();
+ 	}
+ 	if (st != 1) {
+-		printf("SWEET WMI: 4-way handshake not done (%s, %s)\n", htc.joined && !htc.lost ? "8 s" : "the AP sent us away",
+-		    m1 ? "message 1 came: wrong password?" : "no message 1 from the AP");
+-		return m1 ? EAUTH : ETIMEDOUT;
++		/*
++		 * 0290: "wrong password" (EAUTH: wifid stops joining that network by itself and wants the password
++		 * typed again) only when the AP really turned the key down: it repeated message 1, or it sent us
++		 * away with a deauthentication / disassociation after message 1. Message 1 once and then nothing
++		 * for 8 s (a busy phone at boot, a frame lost) was EAUTH too until now; it is a timeout.
++		 */
++		bool away = htc.lost && (htc.lost_why >> 16 == 0xc0 || htc.lost_why >> 16 == 0xa0);
++		bool refused = m1 && (sweet_wlsec_refused() || away);
++		printf("SWEET WMI: 4-way handshake not done (%s, %s%s)\n", htc.joined && !htc.lost ? "8 s" : "the AP sent us away",
++		    m1 ? "message 1 came" : "no message 1 from the AP", refused ? ": the key was turned down" : m1 ? ": a timeout" : "");
++		return refused ? EAUTH : ETIMEDOUT;
+ 	}
+ 	for (t = 0; t < 50; ++t) {      /* (message 4 on the air before the key goes in) */
+ 		wlce_tick();
+@@ -2275,11 +2284,19 @@ sweet_wlce_join(const uint8_t *ssid, unsigned len, const uint8_t *bssid, const u
+ 	 * first failure is what is reported if none lets us in.
+ 	 */
+ 	int r = 0, first = 0;
++	bool again = false, refused = false;
+ 	wlce_nskip = 0;
+ 	for (unsigned attempt = 0; attempt < 4; attempt++) {
+ 		int s = 0;
+ 		r = wlce_assoc(ssid, len, attempt == 0 ? bssid : NULL, pmk);
+ 		if (r == 1 && attempt != 0) {           /* no other access point of that name */
++			/* 0290: then the same one once more after a handshake / answer timeout (not after a refusal) */
++			if (wlce_nskip != 0 && !again && (first == 100 + ETIMEDOUT || ((first == 6 || first == 8) && !refused))) {
++				again = true;
++				wlce_nskip = 0;
++				printf("SWEET WMI: no other access point of that name: the same one once more\n");
++				continue;
++			}
+ 			break;
+ 		}
+ 		if (r == 0 && htc.rsn) {
+@@ -2310,6 +2327,7 @@ sweet_wlce_join(const uint8_t *ssid, unsigned len, const uint8_t *bssid, const u
+ 		}
+ 		if (first == 0) {
+ 			first = s != 0 ? 100 + s : r;
++			refused = (r == 6 && htc.auth_rx) || (r == 8 && htc.assoc_rx);
+ 		}
+ 		if (!(s == ETIMEDOUT || r == 6 || r == 8) || wlce_nskip >= 4) {
+ 			break;
+diff --git a/bsd/dev/sweet_wlsec.c b/bsd/dev/sweet_wlsec.c
+index a688744..465af02 100644
+--- a/bsd/dev/sweet_wlsec.c
++++ b/bsd/dev/sweet_wlsec.c
+@@ -275,6 +275,19 @@ sweet_wlsec_state(void)
+ 	return ws.state != 0 ? ws.state : ws.m1 != 0 ? 2 : 0;
+ }
+ 
++/*
++ * 0290: did the AP turn our message 2 down? It sent message 1 again (it ignores a message 2 whose MIC it
++ * cannot check: the key is wrong) or a frame of its own failed our MIC check. One message 1 and then
++ * silence is not that.
++ */
++bool sweet_wlsec_refused(void);
++
++bool
++sweet_wlsec_refused(void)
++{
++	return ws.m1 >= 2 || ws.mic_bad != 0;
++}
++
+ void
+ sweet_wlsec_keys(uint8_t tk[16], uint8_t gtk[32], unsigned *gtk_len, unsigned *gtk_idx, uint8_t rsc[8])
+ {
+diff --git a/bsd/dev/sweet_wlsta.c b/bsd/dev/sweet_wlsta.c
+index 08ee6c5..890839e 100644
+--- a/bsd/dev/sweet_wlsta.c
++++ b/bsd/dev/sweet_wlsta.c
+@@ -23,6 +23,7 @@
+ #include <kern/clock.h>
+ #include <kern/kalloc.h>
+ #include <kern/thread.h>
++#include <kern/sched_prim.h>
+ #include <libkern/libkern.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/redwood_net.h>
+@@ -153,6 +154,50 @@ sta_note_joined(void)
+ 	memcpy(sta_joined.bssid, bssid, 6);
+ }
+ 
++/*
++ * 0290: the last joins, kept and said again with every later join and every data report: when, what key
++ * came (none / the passphrase as typed / the key wifid made of it), the outcome. The USB log is often down
++ * while the phone boots, so the first join's own lines are not seen; these are, later.
++ */
++static struct {
++	uint32_t at_s;
++	uint8_t key;                    /* 0 open, 1 passphrase, 2 PMK */
++	int16_t result;
++} sta_hist[8];
++static unsigned sta_hist_n;
++
++static void
++sta_hist_say(void)
++{
++	for (unsigned i = sta_hist_n > 8 ? sta_hist_n - 8 : 0; i < sta_hist_n; i++) {
++		printf("SWEET WLSTA: join %u at %u s after boot: %s -> %d\n", i + 1, sta_hist[i % 8].at_s,
++		    sta_hist[i % 8].key == 0 ? "no key (open)" : sta_hist[i % 8].key == 1 ? "passphrase as typed" : "key from wifid (PMK)",
++		    sta_hist[i % 8].result);
++	}
++}
++
++/*
++ * 0290: the file systems are pushed out 8 s after every join and every 30 s (boot-arg sweetsync=0: never).
++ * This phone is only ever reset from its buttons, nothing syncs at "shutdown": what wifid and securityd
++ * saved after a join (the known network, its password in the keychain) could still be in memory then,
++ * and the next boot tried the network with what was on the disk.
++ */
++struct sync_args;
++extern int sync(proc_t p, struct sync_args *uap, int32_t *retval);
++static int sta_sync_soon;
++
++static void
++sta_sync_thread(__unused void *parameter, __unused wait_result_t result)
++{
++	for (unsigned n = 0;; n++) {
++		int32_t rv = 0;
++		assert_wait_timeout((event_t)&sta_sync_soon, THREAD_UNINT, sta_sync_soon ? 8000 : 30000, NSEC_PER_MSEC);
++		sta_sync_soon = 0;
++		(void)thread_block(THREAD_CONTINUE_NULL);
++		(void)sync(kernproc, NULL, &rv);
++	}
++}
++
+ static int
+ sta_join(const struct redwood_sta_join *what)
+ {
+@@ -185,6 +230,15 @@ sta_join(const struct redwood_sta_join *what)
+ 	bzero(pmk, sizeof(pmk));
+ 	sta_last_error = r;
+ 	printf("SWEET WLSTA: join (a name of %u bytes, %s) -> %d\n", what->ssid_length, key ? "WPA2" : "open", r);
++	sta_hist[sta_hist_n % 8].at_s = (uint32_t)(sta_now_ms() / 1000);
++	sta_hist[sta_hist_n % 8].key = key == NULL ? 0 : what->passphrase_length != 0 ? 1 : 2;
++	sta_hist[sta_hist_n % 8].result = (int16_t)r;
++	sta_hist_n++;
++	sta_hist_say();
++	if (r == 0) {
++		sta_sync_soon = 1;
++		thread_wakeup((event_t)&sta_sync_soon);
++	}
+ 	if (r == 0) {
+ 		redwood_net_link_state(true);
+ 	}
+@@ -278,6 +332,7 @@ sta_poll(void)
+ 		if (now - sta_last_report_ms >= 300000) {
+ 			sta_last_report_ms = now;
+ 			sweet_wldp_data_report();       /* 0203: transmit completions by reason, every 5 min while joined */
++		sta_hist_say();
+ 		}
+ 		if (now - sta_rssi_ms >= 1000) {
+ 			static struct redwood_sta_bss b;
+@@ -373,6 +428,12 @@ sweet_wlsta_start(void)
+ 	}
+ 	redwood_sta_attach(&sta_ops);
+ 	printf("SWEET WLSTA: en0 and the station are up for wifid\n");
++	uint32_t syncs = 1;
++	thread_t st;
++	(void)PE_parse_boot_argn("sweetsync", &syncs, sizeof(syncs));
++	if (syncs && kernel_thread_start(sta_sync_thread, NULL, &st) == KERN_SUCCESS) {
++		thread_deallocate(st);
++	}
+ 	if (PE_parse_boot_argn("sweetwlanssid", want, sizeof(want)) && want[0] != 0) {
+ 		struct redwood_sta_join *j = kalloc_data(sizeof(*j), Z_WAITOK | Z_ZERO);
+ 		if (j != NULL) {
+-- 
+2.54.0 (Apple Git-157)
+
