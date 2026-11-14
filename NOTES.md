@@ -2,8 +2,8 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
-- **2026-11-14 21:30: Metal device limits filled (SweetMetal2 plugin; phone file changed, user OK'd; not yet checked
-  in Photos)** (diff `phone/metal2/frontend-device-limits.diff`, source `xnu-work/work/m2v-bridge-src`, build
+- **2026-11-14 21:30: Metal device limits filled (SweetMetal2 plugin; phone file changed, user OK'd; Photos opens -
+  user-confirmed after reboot)** (diff `phone/metal2/frontend-device-limits.diff`, source `xnu-work/work/m2v-bridge-src`, build
   `out-limits/`).
   - `_MTLDevice` (Metal 20H392) holds an ivar `_limits` (64 x u32 incl. two floats, then u64 maxBufferLength:
     maxFramebufferStorageBits ... maxTextureWidth2D, maxTextureHeight2D ... maxConstantBufferArguments,
