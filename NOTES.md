@@ -2,6 +2,18 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 13:50: 0292 boot confirms the 1970 clock at en0; 0293 holds en0 back until the clock is set**
+  (patch `xnu/patches/0293-umi-wlan-en0-after-clock.patch`, image **`shim/out/umi-0293-wifi-afterclock.img`**,
+  built, not booted).
+  - 0292 log: `the wall clock when en0 came: day 0 since 1970 (1970s: never set), 00:02 UTC, 149 s after boot`,
+    then `the wall clock was SET: day 20771 ... 12:49 UTC, 209 s after boot` (LTE, user: "time is auto adjusted by
+    LTE"). No join by itself before or after (user: "won't auto connect"). So wifid's boot-time auto-join ran
+    with the 1970 clock and did not look again once the date was right; Wi-Fi off / on later in a boot does.
+  - 0293: `sweet_wlsta_start` waits (polling the radio) until the wall clock is past 2024 or `sweetwlclockwait`
+    s (default 180, 0 = off) before en0 and the Apple80211 entries are made. Log: `en0 after N s of waiting for the
+    wall clock (set / still 1970: given up)`. Without LTE (no SIM, flight mode) it still gives up in 1970: the full
+    fix is an RTC (entry below).
+
 - **2026-11-14 13:40: Wi-Fi 0291 boot: wifid never tries the saved network at boot; a tap joins it with the saved
   key; lead: the clock is 1970 at boot** (0292: patch `xnu/patches/0292-umi-wlan-wall-clock-log.patch`, image
   **`shim/out/umi-0292-wifi-clock.img`**, built, not booted).

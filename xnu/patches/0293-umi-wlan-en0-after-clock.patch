@@ -1,0 +1,50 @@
+From d8b20219c4bea9ae46f3108a20e9f06d09296169 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 13:52:43 +0100
+Subject: [PATCH] umi: wlan (0293): en0 only once the wall clock is set (at
+ most sweetwlclockwait=180 s): wifid's boot-time auto-join looked at its saved
+ networks with a 1970 clock and never joined
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_wlsta.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/bsd/dev/sweet_wlsta.c b/bsd/dev/sweet_wlsta.c
+index c8e95e4..87ed7e3 100644
+--- a/bsd/dev/sweet_wlsta.c
++++ b/bsd/dev/sweet_wlsta.c
+@@ -465,6 +465,30 @@ sweet_wlsta_start(void)
+ 	(void)sweet_wlce_poll();                /* from here every caller holds the lock */
+ 	sta_last_scan_ms = sta_now_ms();
+ 	sweet_wlce_lock(false);
++	/*
++	 * 0293: en0 (and with it wifid's first auto-join) only once the wall clock is set, at most
++	 * sweetwlclockwait s (default 180; 0 = no wait). The 0292 boot: en0 at 149 s with the clock in 1970,
++	 * LTE set it at 209 s; wifid's boot-time auto-join had already looked at the saved networks with dates
++	 * in the future and did not join; it never looked again. The radio is polled meanwhile.
++	 */
++	uint32_t clock_wait = 180;
++	(void)PE_parse_boot_argn("sweetwlclockwait", &clock_wait, sizeof(clock_wait));
++	for (uint32_t t = 0;; t++) {
++		clock_sec_t sec;
++		clock_usec_t usec;
++		clock_get_calendar_microtime(&sec, &usec);
++		if (sec >= 20000 * 86400L || t >= clock_wait * 10) {
++			if (clock_wait != 0) {
++				printf("SWEET WLSTA: en0 after %u s of waiting for the wall clock (%s)\n", t / 10,
++				    sec >= 20000 * 86400L ? "set" : "still 1970: given up");
++			}
++			break;
++		}
++		sweet_wlce_lock(true);
++		(void)sweet_wlce_poll();
++		sweet_wlce_lock(false);
++		delay(100000);
++	}
+ 	if (!redwood_net_attach(&sta_link)) {
+ 		printf("SWEET WLSTA: en0 could not be made\n");
+ 		return 1;
+-- 
+2.54.0 (Apple Git-157)
+
