@@ -2,6 +2,17 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 14:05: 0293 boot: en0 waited for the clock and still no auto-join; 0294 makes the radio say off / on
+  once after a boot** (patch `xnu/patches/0294-umi-wlan-boot-power-blip.patch`, image
+  **`shim/out/umi-0294-wifi-blip.img`**, built, not booted).
+  - 0293 log: `en0 after 35 s of waiting for the wall clock (set)`, `the wall clock when en0 came: ... (set),
+    182 s after boot`; then 10 scans by wifid in ~9 min, 96 scan results read, **no ASSOCIATE**. So the 1970
+    clock was not (the whole) cause; the 0293 wait stays (harmless, `sweetwlclockwait=0` off).
+  - What does join a saved network by itself: Settings' Wi-Fi off / on in a running boot. 0294 imitates that once:
+    60 s after en0, if not joined, POWER (get 19) answers off for 3 s with an EVENT_POWER_CHANGED before and after
+    (`apple80211: the radio said off and on again for wifid`; `sweetwlblip=0` off). Unknown whether wifid treats
+    a power change it did not ask for like its own.
+
 - **2026-11-14 13:50: 0292 boot confirms the 1970 clock at en0; 0293 holds en0 back until the clock is set**
   (patch `xnu/patches/0293-umi-wlan-en0-after-clock.patch`, image **`shim/out/umi-0293-wifi-afterclock.img`**,
   built, not booted).

@@ -1,0 +1,87 @@
+From 33f5bff9a347030bf8ac6e1d75478d7d1211da4c Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:05:00 +0100
+Subject: [PATCH] umi: wlan (0294): 60 s after en0, not joined: the radio
+ reports off for 3 s and on again to wifid, so it runs the auto-join it runs
+ after the Wi-Fi switch (sweetwlblip=0 off)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/redwood_apple80211.c | 21 ++++++++++++++++++++-
+ bsd/dev/sweet_wlsta.c        |  7 +++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 28c742b..505278d 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -192,6 +192,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
+     "a scan's result as iOS 16.5 has it");
+ 
+ /* Apple80211's events (APPLE80211_M_...) */
++static volatile bool power_blip;               /* umi 0294: the radio said off (redwood_apple80211_power_blip) */
+ enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
+        EVENT_SCAN_DONE = 10 };
+ 
+@@ -317,7 +318,7 @@ get(struct apple80211req *request)
+ 	case 19: {                              /* the radio's power: one radio. Until the driver is up it counts as on: it */
+ 		struct {                        /* is being brought up, and iOS asks this once, early */
+ 			uint32_t version, radios, state[4];
+-		} answer = { .version = 1, .radios = 1, .state = { !redwood_sta_present() || redwood_sta_powered() } };
++		} answer = { .version = 1, .radios = 1, .state = { !power_blip && (!redwood_sta_present() || redwood_sta_powered()) } };
+ 
+ 		return give(request, &answer, sizeof(answer));
+ 	}
+@@ -615,6 +616,24 @@ post(uint32_t code, const void *data, uint32_t length)
+ 	kev_post_msg(&message);
+ }
+ 
++/*
++ * umi 0294: the radio reported off for 3 s and on again, as if its power had been switched: wifid then
++ * runs the auto-join it runs after Settings' Wi-Fi switch (which joins a saved network), and not only
++ * the one at its start (which, on this phone, does not). The station side asks for it once after a boot.
++ */
++void redwood_apple80211_power_blip(void);
++
++void
++redwood_apple80211_power_blip(void)
++{
++	printf("apple80211: the radio said off and on again for wifid (boot-time auto-join)\n");
++	power_blip = true;
++	post(EVENT_POWER_CHANGED, NULL, 0);
++	delay(3000000);
++	power_blip = false;
++	post(EVENT_POWER_CHANGED, NULL, 0);
++}
++
+ /* What the station side says has happened (bsd/dev/redwood_sta.c calls this, on its thread or the station's). */
+ void
+ redwood_apple80211_event(enum redwood_sta_event event, int status)
+diff --git a/bsd/dev/sweet_wlsta.c b/bsd/dev/sweet_wlsta.c
+index 87ed7e3..308dd53 100644
+--- a/bsd/dev/sweet_wlsta.c
++++ b/bsd/dev/sweet_wlsta.c
+@@ -47,6 +47,7 @@ extern void sweet_wldp_set_rx_handler(void (*fn)(const uint8_t *frame, uint32_t
+ extern void sweet_wldp_data_report(void);
+ extern uint32_t sweet_wldp_tx_done(void);
+ extern uint32_t sweet_wlce_ap_heard(void);
++extern void redwood_apple80211_power_blip(void);
+ extern void sweet_wlce_scan_name(const uint8_t *ssid, unsigned len);
+ extern void sweet_wlce_scan_channels(const uint16_t *mhz, unsigned count, uint16_t dwell_ms);
+ extern int sweet_wlce_probe_ap(void);
+@@ -227,6 +228,12 @@ sta_sync_thread(__unused void *parameter, __unused wait_result_t result)
+ 		sta_sync_soon = 0;
+ 		(void)thread_block(THREAD_CONTINUE_NULL);
+ 		(void)sync(kernproc, NULL, &rv);
++		/* 0294: 60 s after en0, not joined: the radio says off / on to wifid once (sweetwlblip=0: never) */
++		uint32_t blip = 1;
++		(void)PE_parse_boot_argn("sweetwlblip", &blip, sizeof(blip));
++		if (n == 1 && blip && !sweet_wlce_joined(NULL)) {
++			redwood_apple80211_power_blip();
++		}
+ 	}
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+
