@@ -13,6 +13,9 @@ a sync on the phone, so what this writes survives the next reset.
   tools/umi-files.py rm REMOTE
   tools/umi-files.py chmod REMOTE MODE
   tools/umi-files.py list REMOTE-DIR             (kernel 0204+: "d" dir, "l" link, "-" file)
+
+Phone paths may contain spaces with kernel 0298+: they travel %-escaped (space = %20, "%" = %25);
+with an older kernel such a path is refused here (the server would cut it at the space).
 """
 import os
 import socket
@@ -39,21 +42,45 @@ def reply(s):
     return line
 
 
+def esc(path):
+    return path.replace('%', '%25').replace(' ', '%20')
+
+
+def server_unescapes():
+    """Kernel 0298+ decodes %XX: "/%2E" is then "/." (the root); an older server finds no such file."""
+    s = conn()
+    s.sendall(b'LIST /%2E\n')
+    line = b''
+    while not line.endswith(b'\n'):
+        c = s.recv(1)
+        if not c:
+            break
+        line += c
+    s.close()
+    return line.startswith(b'OK')
+
+
 def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, args = argv[0], argv[1:]
-    # PUT / MKDIR / LINK / CHMOD lines are split on spaces by the kernel: a remote path with a space would be cut
-    # there (2026-11-14: "Application Support/..." became a file named "Application"). GET and LIST work with spaces.
-    if cmd in ('put', 'mkdir', 'link', 'chmod') and any(' ' in a for a in args[1 if cmd in ('put', 'link') else 0:][:1]):
-        raise SystemExit(f'{cmd}: the remote path must not contain spaces (the file server would cut it there)')
+    paths = {'put': [1], 'get': [0], 'list': [0], 'mkdir': [0], 'rm': [0], 'chmod': [0], 'link': [0, 1]}.get(cmd, [])
+    if any(i < len(args) and (' ' in args[i] or '%' in args[i]) for i in paths):
+        # 2026-11-14: before 0298 "Application Support/..." became a file named "Application"
+        if not server_unescapes():
+            if cmd in ('get', 'list') and not any('%' in args[i] for i in paths):
+                pass  # GET / LIST always took the rest of the line: plain paths with spaces work there
+            else:
+                raise SystemExit(f'{cmd}: this kernel cuts paths at spaces and does not decode %XX: boot 0298 or later')
+        else:
+            args = [esc(a) if i in paths else a for i, a in enumerate(args)]
     s = conn()
     if cmd == 'put':
         local, remote = args[0], args[1]
         mode = int(args[2], 8) if len(args) > 2 else stat.S_IMODE(os.stat(local).st_mode)
         data = open(local, 'rb').read()
         s.sendall(f'PUT {remote} {mode:o} {len(data)}\n'.encode() + data)
-        print(remote, reply(s))
+        print(args[1], reply(s))
     elif cmd == 'get':
         s.sendall(f'GET {args[0]}\n'.encode())
         n = int(reply(s).split()[1])

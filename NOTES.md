@@ -2,6 +2,30 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 16:30: the iOS 16 wallpaper is plain blue because no HEIC image decodes; file server 0298 takes paths
+  with spaces and shortens overwritten files (0298 user-booted, file tests passed)** (patch
+  `xnu/patches/0298-umi-files-spaces-truncate.patch`, kernel fdf61b1, image **`shim/out/umi-0298-files-spaces.img`** =
+  0297's boot line exactly + 0298).
+  - User photo: home screen flat blue. The WWDC 2022 poster (`7400`, 3 CA archives) = a CAGradientLayer (the blue)
+    + five `CGImage` layers from HEIC files (Head, Head Mask, Leg, Arm, Body). Only the gradient draws. SpringBoard
+    looks up `AppleVXD375/390/393` (the hardware HEVC decoder) -> none. Photos won't open either (user): `assetsd`
+    aborts in a loop (sig 6, uncaught C++/ObjC exception inside a dispatch callout; reason not logged yet).
+    **Real fix not done: HEIC/HEVC decoding on a phone without AppleVXD** (find where ImageIO/CMPhoto/VideoToolbox
+    gives up instead of using the software decoder).
+  - Stopgap (user OK'd, user: "a workaround, not a fix"): in
+    `/Library/Wallpaper/Collections/iOS_16~iphone.wallpaperCollection/Wallpapers/7400.WWDC_2022-375w-812h@3x~iphone.wallpaper/`
+    the three `main.caml` point at PNG copies (`sips` on the Mac) `Head.png HeadMask.png Leg.png Arm.png Body.png`
+    next to the HEICs; originals kept as `main.caml.sweet-orig`. Not yet seen on screen; posters already added keep
+    their own HEIC copies under `PRBPosterExtensionDataStore/59/.../configurations/<UUID>/versions/N/contents`.
+  - **File server bugs found and fixed (0298):** (1) request lines were split at spaces, so a PUT to
+    ".../Application Support/..." wrote a file `/private/var/mobile/Library/Application` (removed). Paths now travel
+    %-escaped (`%20`, `%25`); `tools/umi-files.py` escapes and, with an older kernel, refuses a write path with a
+    space (probe: `LIST /%2E`). (2) PUT over a longer existing file kept its tail (O_TRUNC through `vnode_open` did
+    not shorten): rewritten `main.caml` files ended in old bytes (`caml>` after `</caml>`; fixed by rm + put). 0298
+    sets `va_data_size` to the written size. **Any earlier PUT that replaced a longer file may have left such a
+    tail** (files read back "identical" were checked; others not). Test on 0298: dir + file with spaces and `%`,
+    5000 -> 6 bytes read back 6. No RMDIR: empty `/private/var/tmp/sweet space test` left on the phone.
+
 - **2026-11-14 16:10: WALLPAPER CHOICE SURVIVES REBOOTS; the "blue wallpaper back at every boot" did not reproduce
   (user-verified, two reboots, no kernel or phone-file change).** The blue one is the iOS 16 WWDC 2022 poster
   (`7400.WWDC_2022`, CollectionsPoster config `28C11B6B-...`), so it is not missing; user: the other stock wallpapers

@@ -1,0 +1,104 @@
+From fdf61b1d7c066f9b2d08d9ebf8f2fe65b649d5ad Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 16:02:52 +0100
+Subject: [PATCH] umi: files (0298): request paths are %-escaped (%20 = space)
+ so they may hold spaces; PUT sets the file size explicitly (O_TRUNC through
+ vnode_open left a longer file's tail)
+
+---
+ bsd/dev/sweet_files.c | 38 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/sweet_files.c b/bsd/dev/sweet_files.c
+index dc85636..d6cd314 100644
+--- a/bsd/dev/sweet_files.c
++++ b/bsd/dev/sweet_files.c
+@@ -11,7 +11,8 @@
+  *   CHMOD <path> <mode-octal>\n                   -> "OK\n"
+  *   LIST <dir>\n                                  -> "OK <size>\n<lines "<d_type> <name>">"
+  *
+- * Errors: "ERR <errno>\n". Paths have no spaces. Started with the USB gadget
++ * Errors: "ERR <errno>\n". Paths are %-escaped: "%XX" is the byte 0xXX (tools/umi-files.py sends a
++ * space as %20 and "%" as %25), so paths may hold spaces ("Application Support"); a plain path still works. Started with the USB gadget
+  * (sweet_usb.c) when the interface comes up (boot-arg sweetfiles=0 keeps it off).
+  *
+  * Ported from ios-flame (NWylynko/ios-flame, patch 0091 bsd/dev/sweet_files.c,
+@@ -174,6 +175,28 @@ sf_setattr(const char *path, int mode, bool owner)
+ 	return err;
+ }
+ 
++/* "%XX" -> byte 0xXX in place (paths travel space-free); a lone "%" is kept. */
++static void
++sf_unescape(char *s)
++{
++	char *o = s;
++	for (; *s; s++) {
++		int h = -1, l = -1;
++		if (s[0] == '%' && s[1] && s[2]) {
++			char c1 = s[1], c2 = s[2];
++			h = (c1 >= '0' && c1 <= '9') ? c1 - '0' : (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10 : (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10 : -1;
++			l = (c2 >= '0' && c2 <= '9') ? c2 - '0' : (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10 : (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10 : -1;
++		}
++		if (h >= 0 && l >= 0 && (h | l)) {
++			*o++ = (char)(h * 16 + l);
++			s += 2;
++		} else {
++			*o++ = *s;
++		}
++	}
++	*o = 0;
++}
++
+ static int
+ sf_put(socket_t so, const char *path, int mode, uint64_t size)
+ {
+@@ -198,6 +221,14 @@ sf_put(socket_t so, const char *path, int mode, uint64_t size)
+ 		}
+ 		off += chunk;
+ 	}
++	if (!err && vp != NULLVP) {
++		/* O_TRUNC through vnode_open did not shorten a longer existing file (2026-11-14: a
++		 * rewritten main.caml kept the old file's last bytes): set the size explicitly. */
++		struct vnode_attr va;
++		VATTR_INIT(&va);
++		VATTR_SET(&va, va_data_size, (off_t)size);
++		err = vnode_setattr(vp, &va, ctx);
++	}
+ 	if (vp != NULLVP) {
+ 		vnode_close(vp, FWRITE, ctx);
+ 	}
+@@ -321,6 +352,7 @@ sf_handle(socket_t so)
+ 		}
+ 		memcpy(a, p, (size_t)(sp - p));
+ 		a[sp - p] = 0;
++		sf_unescape(a);
+ 		mode = (unsigned)strtoul(sp + 1, &p, 8);
+ 		n = sf_dec(p);
+ 		err = sf_put(so, a, (int)mode, n);
+@@ -330,11 +362,13 @@ sf_handle(socket_t so)
+ 		return;
+ 	}
+ 	if (!strncmp(line, "GET ", 4)) {
++		sf_unescape(line + 4);
+ 		err = sf_get(so, line + 4);
+ 		printf("SWEET FILES: GET %s -> %d\n", line + 4, err);
+ 		return;
+ 	}
+ 	if (!strncmp(line, "LIST ", 5)) {
++		sf_unescape(line + 5);
+ 		err = sf_list(so, line + 5);
+ 		printf("SWEET FILES: LIST %s -> %d\n", line + 5, err);
+ 		return;
+@@ -348,7 +382,9 @@ sf_handle(socket_t so)
+ 	char *arg1 = sp + 1, *arg2 = strchr(arg1, ' ');
+ 	if (arg2) {
+ 		*arg2++ = 0;
++		sf_unescape(arg2);
+ 	}
++	sf_unescape(arg1);
+ 	if (!strcmp(line, "MKDIR")) {
+ 		err = sweet_vfs_mkdir(arg1, arg2 ? (int)strtoul(arg2, NULL, 8) : 0755);
+ 		if (err == EEXIST) {
+-- 
+2.54.0 (Apple Git-157)
+
