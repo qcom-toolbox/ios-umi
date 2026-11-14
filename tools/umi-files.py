@@ -43,6 +43,10 @@ def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, args = argv[0], argv[1:]
+    # PUT / MKDIR / LINK / CHMOD lines are split on spaces by the kernel: a remote path with a space would be cut
+    # there (2026-11-14: "Application Support/..." became a file named "Application"). GET and LIST work with spaces.
+    if cmd in ('put', 'mkdir', 'link', 'chmod') and any(' ' in a for a in args[1 if cmd in ('put', 'link') else 0:][:1]):
+        raise SystemExit(f'{cmd}: the remote path must not contain spaces (the file server would cut it there)')
     s = conn()
     if cmd == 'put':
         local, remote = args[0], args[1]

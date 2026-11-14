@@ -19,6 +19,11 @@
     (the GPU / poster extension crash-loop period or the LS-reset boots); if it comes back, read
     `SelectedConfigurationIdentifier.plist` before and after the boot and the ordering's index 0 (PosterBoard's
     fallback when the selection is unusable).
+  - 16:20: user asked for the stock iOS 16 wallpaper as the current one. Meanwhile a new iOS 16 poster was added and
+    selected on the phone (`F1A6F356`, CollectionsPoster `7400.WWDC_2022`, ordering index 8). My write of the selection
+    file did NOT land: `tools/umi-files.py put` with a path containing a space ("Application Support") is cut at the
+    space by the kernel file server -> it created a file `/private/var/mobile/Library/Application` (removed again, list
+    checked). umi-files.py now refuses put / mkdir / link / chmod paths with spaces; GET and LIST handle them.
 
 - **2026-11-14 15:35: STATUS BAR, DOCK, CORNERS, CAMERA HOLE AND KEYBOARD FIXED (user-verified)** (patches
   `xnu/patches/0296-umi-display-scaler-fit.patch` + `0297-umi-exec-statusbar-lib.patch`, image
