@@ -2,6 +2,33 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: native Dynamic Island now loads; lock-screen UI works, app activities still open.**
+  - Recovery from the earlier failed trial succeeded: original lib restored + 0301 Fastboot boot, user confirmed Home.
+    Correct **RM then PUT** signed-library installation fixes the respring failures: loader-only restart ran normally,
+    with no cs_invalid_page. Do not overwrite a mapped signed vnode with PUT even though byte readback matches.
+  - Current `phone/sweet-island/sweet_island.m` no longer uses Substrate or executable patches: it validates
+    the ADRP/LDR fast-path in SBFEffectiveArtworkSubtype, initializes dispatch_once, then sets that function's
+    writable process-local cached result from 2436 to 2556. SBSEnableJindo was already true and stays untouched.
+    libsweet-sb dlopens the adapter at UIApplication init in SpringBoard; geometry hooks match the camera.
+  - Live logs prove successful load, native view layout and main loop >20 s. minimumSensorRegionFrame and
+    _frameForSensorRegionInBounds now both report x34.2 y8.1 w24 h24 (375x812 points, center133/2.88,58/2.88).
+    User: works on lock screen; extra centered notch subsequently disappeared after overriding
+    SBSystemApertureSettings hideRemotePrototypingFallbackPill = YES. User calls position "top left under the camera".
+    Expanded frame clamped inside display; landscape calibration still pending.
+  - **Open: app features (Clock timer) don't work.** MobileTimerSupport has MTSessionsManager and Swift
+    MTSessionsProvider +supportsSessions. Initial hook saw these classes absent in mobiletimerd but present in
+    MobileTimer, where original result was already true. Current sb build uses objc_addLoadImageFunc to attach
+    hooks after runtime registration (no framework methods invoked under runtime lock). Installed sb by build script
+    install + identical readback; restarted only mobiletimerd/MobileTimer, kept SpringBoard running.
+  - Streaming unified log (120 s) through existing `/usr/local/bin/sweet-oslog-dump`, names MobileTimer,
+    mobiletimerd, sessionkitd, SpringBoard; output `/var/tmp/sweet-heic-probe.log`, host copy
+    `/tmp/sweet-island-session.log`. User asked to reopen Clock, start a new 2-minute timer, return Home.
+    Next: inspect session creation/error logs, verify new timer hook logs; don't claim app integration works.
+  - Diagnostics: `/var/tmp/sweet-island.log` (native geometry/main-loop), `sweet-island-loader.log`,
+    `sweet-island-timer-{MobileTimer,mobiletimerd}.log`, `sweet-island-views.log` (view classes/frames only).
+    Optional adapter guard `/var/tmp/sweet-island.starting` cleared after 20 s main loop; surviving marker causes
+    next launch to create `/var/tmp/sweet-island.disabled`. Current phone has adapter enabled.
+
 - **2026-11-14: Dynamic Island experiment FAILED; recovery in progress.** User wants native island over umi's
   upper-left camera and explicitly says **build locally on this computer**, not GitHub Actions.
   - **Recovery boot completed:** user entered Fastboot; `fastboot boot shim/out/umi-0301-sandbox-ext.img`

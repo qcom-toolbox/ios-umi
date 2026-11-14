@@ -294,6 +294,55 @@ sweet_maybe_run_probe(void)
 }
 
 static IMP sweet_sb_orig_init;
+static unsigned sweet_timer_hooked;
+static FILE *sweet_timer_log;
+static BOOL
+sweet_timer_sessions(id self, SEL cmd)
+{
+	(void)self;
+	(void)cmd;
+	return YES;
+}
+
+static void
+sweet_timer_image_loaded(const struct mach_header *header)
+{
+	(void)header;
+	/* Called after runtime registration, before +load; do not invoke framework
+	 * code here while the runtime lock is held. */
+	const char *names[] = { "MTSessionsManager", "_TtC18MobileTimerSupport18MTSessionsProvider" };
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (sweet_timer_hooked & (1u << i)) continue;
+		Class c = objc_getClass(names[i]);
+		Method m = class_getClassMethod(c, sel_registerName("supportsSessions"));
+		if (m != NULL) {
+			sweet_sb_hook(c, "supportsSessions", (IMP)sweet_timer_sessions);
+			sweet_timer_hooked |= 1u << i;
+			if (sweet_timer_log) {
+				fprintf(sweet_timer_log, "%s supportsSessions hooked\n", names[i]);
+				fflush(sweet_timer_log);
+			}
+		}
+	}
+}
+
+static void
+sweet_timer_init(void)
+{
+	const char *program = getprogname();
+	if ((strcmp(program, "mobiletimerd") != 0 && strcmp(program, "MobileTimer") != 0) ||
+	    access("/usr/local/lib/libsweet-island.dylib", F_OK) != 0 ||
+	    access("/var/tmp/sweet-island.disabled", F_OK) == 0) return;
+	char path[128];
+	snprintf(path, sizeof(path), "/var/tmp/sweet-island-timer-%s.log", program);
+	sweet_timer_log = fopen(path, "w");
+	if (sweet_timer_log) {
+		fprintf(sweet_timer_log, "waiting for timer framework registration\n");
+		fflush(sweet_timer_log);
+	}
+	objc_addLoadImageFunc(sweet_timer_image_loaded);
+}
+
 static id
 sweet_sb_app_init(id self, SEL cmd)
 {
@@ -312,6 +361,7 @@ static void
 sweet_sb_init(void)
 {
 	sweet_maybe_run_probe();
+	sweet_timer_init();
 	/* Optional native Dynamic Island adapter, confined to SpringBoard. */
 	if (strcmp(getprogname(), "SpringBoard") == 0) {
 		/* UIKit is registered here; SpringBoard's image may not be registered yet. */

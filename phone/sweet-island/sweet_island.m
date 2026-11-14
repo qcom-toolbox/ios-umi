@@ -11,25 +11,79 @@
 
 static FILE *logfile;
 static CGRect (*originalSensor)(id, SEL, CGRect);
+static CGRect (*originalMinimumSensor)(id, SEL);
 static CGRect (*originalPortrait)(id, SEL, CGRect, NSDirectionalEdgeInsets, NSInteger);
 static void (*originalLayout)(id, SEL);
 static unsigned layouts;
 static const CGFloat cameraX = 133.0 / 2.88, cameraY = 58.0 / 2.88;
 
-static long artwork(void) { return 2556; }
-static bool enabled(void) { return true; }
+static void dumpView(FILE *f, UIView *view, unsigned depth, unsigned *count)
+{
+    if (depth > 12 || (*count)++ > 600) return;
+    CGRect r = [view convertRect:view.bounds toView:nil];
+    fprintf(f, "%*s%s %.1f %.1f %.1f %.1f hidden %d alpha %.2f\n", depth,
+        "", object_getClassName(view), r.origin.x, r.origin.y, r.size.width, r.size.height,
+        view.hidden, view.alpha);
+    for (UIView *child in view.subviews) dumpView(f, child, depth + 1, count);
+}
+
+static void dumpWindows(void)
+{
+    FILE *f = fopen("/var/tmp/sweet-island-views.log", "w");
+    if (!f) return;
+    unsigned count = 0;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) dumpView(f, window, 0, &count);
+    }
+    fclose(f);
+}
+
+/* 20H392's SBFEffectiveArtworkSubtype caches its result in writable __DATA.
+ * Decode the guarded ADRP x8 / LDR x0 pair after dispatch_once's fast-path
+ * check. This changes per-process data, not signed executable instructions.
+ * Fail closed on a different implementation; never guess an absolute address.
+ */
+static long *artworkCache(long (*subtype)(void))
+{
+    const uint32_t *code = (const void *)subtype;
+    if ((code[6] & 0x9f00001f) != 0x90000008 ||
+        (code[7] & 0xffc003ff) != 0xf9400100 ||
+        code[8] != 0xa8c17bfd || code[9] != 0xd65f03c0) return NULL;
+    int64_t pages = ((code[6] >> 29) & 3) | (((code[6] >> 5) & 0x7ffff) << 2);
+    if (pages & (1 << 20)) pages -= 1 << 21;
+    uintptr_t page = (uintptr_t)&code[6] & ~(uintptr_t)0xfff;
+    long *value = (void *)(page + pages * 4096 + ((code[7] >> 10) & 0xfff) * 8);
+    return *value == subtype() ? value : NULL;
+}
 static CGSize sensorSize(id self, SEL cmd) { (void)self; (void)cmd; return CGSizeMake(24, 24); }
 static CGSize inertSize(id self, SEL cmd) { (void)self; (void)cmd; return CGSizeMake(28, 28); }
+static BOOL hideFallback(id self, SEL cmd) { (void)self; (void)cmd; return YES; }
 /* There is one camera, no visible space between two sensors. */
 static CGRect interSensor(id self, SEL cmd) { (void)self; (void)cmd; return CGRectZero; }
 
 static CGRect sensorFrame(id self, SEL cmd, CGRect bounds)
 {
     CGRect r = originalSensor(self, cmd, bounds);
-    /* Landscape keeps Apple's orientation handling until measured on hardware. */
-    if (bounds.size.height >= bounds.size.width) {
+    /* Bounds can be a short status-bar strip: use the controller's orientation,
+     * not its aspect ratio. Landscape retains Apple's uncalibrated handling. */
+    NSInteger orientation = ((NSInteger (*)(id, SEL))objc_msgSend)(self,
+        sel_registerName("_activeElementInterfaceOrientation"));
+    if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationUnknown) {
         r.origin.x = bounds.origin.x + cameraX - r.size.width / 2;
         r.origin.y = bounds.origin.y + cameraY - r.size.height / 2;
+    }
+    return r;
+}
+
+static CGRect minimumSensorFrame(id self, SEL cmd)
+{
+    CGRect r = originalMinimumSensor(self, cmd);
+    NSInteger orientation = ((NSInteger (*)(id, SEL))objc_msgSend)(self,
+        sel_registerName("_activeElementInterfaceOrientation"));
+    if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationUnknown) {
+        r.origin.x = cameraX - r.size.width / 2;
+        r.origin.y = cameraY - r.size.height / 2;
     }
     return r;
 }
@@ -50,7 +104,7 @@ static CGRect portraitFrame(id self, SEL cmd, CGRect bounds,
 static void layout(id self, SEL cmd)
 {
     originalLayout(self, cmd);
-    if (layouts++ < 12 && logfile) {
+    if (layouts++ < 100 && logfile) {
         UIView *view = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("view"));
         CGRect sensor = ((CGRect (*)(id, SEL))objc_msgSend)(self, sel_registerName("minimumSensorRegionFrame"));
         fprintf(logfile, "layout %u view %.1f %.1f sensor %.1f %.1f %.1f %.1f\n",
@@ -79,16 +133,17 @@ static void install(void)
     const char *metricMethods[] = {"sensorRegionSize", "_inertSize", "interSensorRegionInWindowSpace"};
     const char *controllerMethods[] = {"_frameForSensorRegionInBounds:",
         "_portraitFrameForPrimaryContainerViewInBounds:withPreferredEdgeOutsets:layoutDirection:",
-        "viewDidLayoutSubviews", "minimumSensorRegionFrame"};
+        "viewDidLayoutSubviews", "minimumSensorRegionFrame", "_activeElementInterfaceOrientation"};
     for (unsigned i = 0; i < sizeof(metricMethods)/sizeof(*metricMethods); i++)
         if (!class_getInstanceMethod(metrics, sel_registerName(metricMethods[i]))) goto missing;
     for (unsigned i = 0; i < sizeof(controllerMethods)/sizeof(*controllerMethods); i++)
         if (!class_getInstanceMethod(controller, sel_registerName(controllerMethods[i]))) goto missing;
-    void *substrate = dlopen("/usr/lib/libsubstrate.dylib", RTLD_NOW);
-    void (*hookFunction)(void *, void *, void **) = substrate ? dlsym(substrate, "MSHookFunction") : NULL;
     long (*subtype)(void) = dlsym(RTLD_DEFAULT, "SBFEffectiveArtworkSubtype");
     bool (*jindo)(void) = dlsym(RTLD_DEFAULT, "SBSEnableJindo");
-    if (!hookFunction || !subtype || !jindo) goto missing;
+    if (!subtype || !jindo || !jindo()) goto missing;
+    long oldSubtype = subtype(); /* initialize the dispatch_once cache */
+    long *cachedSubtype = artworkCache(subtype);
+    if (oldSubtype != 2436 || !cachedSubtype) goto missing;
     if (logfile) { fprintf(logfile, "before: artwork %ld enabled %d\n", subtype(), jindo()); fflush(logfile); }
     hook(metrics, metricMethods[0], (IMP)sensorSize);
     hook(metrics, metricMethods[1], (IMP)inertSize);
@@ -96,8 +151,11 @@ static void install(void)
     originalSensor = (void *)hook(controller, controllerMethods[0], (IMP)sensorFrame);
     originalPortrait = (void *)hook(controller, controllerMethods[1], (IMP)portraitFrame);
     originalLayout = (void *)hook(controller, controllerMethods[2], (IMP)layout);
-    hookFunction((void *)subtype, (void *)artwork, NULL);
-    hookFunction((void *)jindo, (void *)enabled, NULL);
+    originalMinimumSensor = (void *)hook(controller, controllerMethods[3], (IMP)minimumSensorFrame);
+    Class settings = objc_getClass("SBSystemApertureSettings");
+    if (class_getInstanceMethod(settings, sel_registerName("hideRemotePrototypingFallbackPill")))
+        hook(settings, "hideRemotePrototypingFallbackPill", (IMP)hideFallback);
+    *cachedSubtype = 2556;
     if (logfile) { fprintf(logfile, "installed: artwork %ld enabled %d camera %.3f %.3f\n",
         subtype(), jindo(), cameraX, cameraY); fflush(logfile); }
     return;
@@ -123,5 +181,6 @@ __attribute__((constructor)) static void prepare(void)
             fprintf(logfile, "main loop alive, layouts %u\n", layouts);
             fflush(logfile);
         }
+        dumpWindows();
     });
 }
