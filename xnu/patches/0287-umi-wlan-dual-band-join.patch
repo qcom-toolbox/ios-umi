@@ -1,0 +1,153 @@
+From b346f2a964e2b84d033274780225ef6ad0acd50e Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:28:53 +0100
+Subject: [PATCH] umi: wlan (0287): dual-band names - the network's next access
+ point is tried when one does not answer / refuses / never starts the
+ handshake (up to 3 more); 5 GHz preferred only above -72 dBm (was -80;
+ sweetwl5gmin=N); access points not heard for 30 s rank last; Wi-Fi off wipes
+ the kernel's copy of the last network's key
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ bsd/dev/redwood_sta.c |  5 ++-
+ bsd/dev/sweet_wlce.c  | 86 ++++++++++++++++++++++++++++++++++---------
+ 2 files changed, 73 insertions(+), 18 deletions(-)
+
+diff --git a/bsd/dev/redwood_sta.c b/bsd/dev/redwood_sta.c
+index 5428c90..20d8f33 100644
+--- a/bsd/dev/redwood_sta.c
++++ b/bsd/dev/redwood_sta.c
+@@ -312,7 +312,10 @@ redwood_sta_ask_power(bool on)
+ 	asked_power_on = on;
+ 	if (!on) {
+ 		asked_scan = asked_join = asked_leave = false;
+-		rejoin_due = false;             /* 0286 (the network stays known: the switch back on may rejoin it via wifid) */
++		rejoin_due = false;             /* 0286 */
++		/* 0287: Wi-Fi switched off: the kernel keeps no copy of the network's key (wifid joins again from the keychain) */
++		bzero(&last_joined, sizeof(last_joined));
++		bzero(&asked_join_what, sizeof(asked_join_what));
+ 	}
+ 	lck_mtx_unlock(&sta_lock);
+ 	thread_wakeup((event_t)&sta_ops);
+diff --git a/bsd/dev/sweet_wlce.c b/bsd/dev/sweet_wlce.c
+index 7623a24..159910e 100644
+--- a/bsd/dev/sweet_wlce.c
++++ b/bsd/dev/sweet_wlce.c
+@@ -1463,6 +1463,10 @@ wlce_vht_min(uint16_t a, uint16_t b)
+ 	return m;
+ }
+ 
++/* 0287: access points of the wanted name that did not let us in during this join (sweet_wlce_join tries the others) */
++static uint8_t wlce_skip[4][6];
++static unsigned wlce_nskip;
++
+ static int
+ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const uint8_t *pmk)
+ {
+@@ -1480,15 +1484,25 @@ wlce_assoc(const uint8_t *ssid, unsigned wl, const uint8_t *want_bssid, const ui
+ 	}
+ 	/*
+ 	 * 0249: band preference, as phones steer: a 5 GHz access point counts `sweetwl5gbonus` dB (default 15)
+-	 * stronger than it is, unless it is heard below -80 dBm (a dual-band name otherwise lands on 2.4 GHz,
+-	 * whose signal is nearly always the stronger).
++	 * stronger than it is, unless it is heard below -72 dBm (a dual-band name otherwise lands on 2.4 GHz,
++	 * whose signal is nearly always the stronger). 0287: the limit was -80 dBm, where a 5 GHz link is slow
++	 * and drops while the same router's 2.4 GHz is fine (boot-arg sweetwl5gmin=<dBm below zero>, default 72);
++	 * an access point not heard for 30 s counts 100 dB weaker (a band that was switched off is not picked
++	 * while the other one is on the air); those in wlce_skip are left out.
+ 	 */
++	uint32_t min5 = 72;
++	(void)PE_parse_boot_argn("sweetwl5gmin", &min5, sizeof(min5));
+ 	uint32_t bonus = 15;
+ 	(void)PE_parse_boot_argn("sweetwl5gbonus", &bonus, sizeof(bonus));
+ 	int score_best = -1000;
+ 	for (i = 0; i < MIN(htc.nbss, WLCE_BSS_MAX); ++i) {
+-		int score = htc.bss_rssi[i] + (htc.bss_ch[i] > 14 && htc.bss_rssi[i] >= -80 ? (int)bonus : 0);
+-		if (htc.bss_ssid_len[i] == wl && memcmp(htc.bss_ssid[i], ssid, wl) == 0 &&
++		int score = htc.bss_rssi[i] + (htc.bss_ch[i] > 14 && htc.bss_rssi[i] >= -(int)min5 ? (int)bonus : 0) -
++		    (wlce_now_ms() - htc.bss_seen[i] > 30000 ? 100 : 0);
++		bool skip = false;
++		for (unsigned k = 0; k < wlce_nskip; k++) {
++			skip |= memcmp(htc.bss[i], wlce_skip[k], 6) == 0;
++		}
++		if (!skip && htc.bss_ssid_len[i] == wl && memcmp(htc.bss_ssid[i], ssid, wl) == 0 &&
+ 		    (want_bssid == NULL || memcmp(htc.bss[i], want_bssid, 6) == 0) &&
+ 		    (best == WLCE_BSS_MAX || score > score_best)) {
+ 			best = i;
+@@ -2253,22 +2267,60 @@ sweet_wlce_join(const uint8_t *ssid, unsigned len, const uint8_t *bssid, const u
+ 	if (htc.joined) {
+ 		(void)sweet_wlce_leave();
+ 	}
+-	int r = wlce_assoc(ssid, len, bssid, pmk);
+-	if (r == 0 && htc.rsn) {
+-		int s = wlce_secure();
+-		if (s != 0) {
+-			(void)sweet_wlce_leave();
+-			return s;
++	/*
++	 * 0287: a name with several access points (a dual-band router: one per band; a mesh): when the one
++	 * picked does not answer or refuses the authentication / association (routers steer clients between
++	 * bands that way), or never starts the handshake, the next best of that name is tried, up to three
++	 * more -- also when wifid named one access point. A wrong password (EAUTH) ends it at once. The
++	 * first failure is what is reported if none lets us in.
++	 */
++	int r = 0, first = 0;
++	wlce_nskip = 0;
++	for (unsigned attempt = 0; attempt < 4; attempt++) {
++		int s = 0;
++		r = wlce_assoc(ssid, len, attempt == 0 ? bssid : NULL, pmk);
++		if (r == 1 && attempt != 0) {           /* no other access point of that name */
++			break;
+ 		}
+-	}
+-	if (r != 0) {
+-		printf("SWEET WMI: join failed at step %d\n", r);
+-		/* a peer / vdev made before the failure is taken down again */
+-		if (r >= 2 && r != 12) {
+-			htc.joined = true;
+-			(void)sweet_wlce_leave();
++		if (r == 0 && htc.rsn) {
++			s = wlce_secure();
++			if (s != 0) {
++				(void)sweet_wlce_leave();
++				if (s != ETIMEDOUT) {
++					wlce_nskip = 0;
++					return s;
++				}
++			}
+ 		}
++		if (r != 0) {
++			printf("SWEET WMI: join failed at step %d\n", r);
++			/* a peer / vdev made before the failure is taken down again */
++			if (r >= 2 && r != 12) {
++				htc.joined = true;
++				(void)sweet_wlce_leave();
++			}
++		}
++		if (r == 0 && s == 0) {
++			if (attempt != 0) {
++				printf("SWEET WMI: joined the network's access point number %u (the ones before did not let us in)\n",
++				    attempt + 1);
++			}
++			wlce_nskip = 0;
++			return 0;
++		}
++		if (first == 0) {
++			first = s != 0 ? 100 + s : r;
++		}
++		if (!(s == ETIMEDOUT || r == 6 || r == 8) || wlce_nskip >= 4) {
++			break;
++		}
++		memcpy(wlce_skip[wlce_nskip++], htc.join_bssid, 6);
++	}
++	wlce_nskip = 0;
++	if (first >= 100) {
++		return first - 100;
+ 	}
++	r = first != 0 ? first : r;
+ 	switch (r) {
+ 	case 0:
+ 		return 0;
+-- 
+2.54.0 (Apple Git-157)
+

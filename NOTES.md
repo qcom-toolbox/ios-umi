@@ -2,6 +2,37 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: Wi-Fi 0287: dual-band names, and a check that the network password does not leak** (patch
+  `xnu/patches/0287-umi-wlan-dual-band-join.patch`, kernel b346f2a, image **`shim/out/umi-0287-dualband.img`** = 0286's
+  line; **built, not booted**: the user has no dual-band network at hand).
+  - User (0286): "it does not work well with dual band network" (one name on 2.4 and 5 GHz); the exact symptom is not
+    known yet (no join / drops / slow?) and there is no log of it. Changed from reading the code:
+    - `sweet_wlce_join`: when the access point picked does not answer or refuses the authentication / association
+      (steps 6 / 8; routers steer clients between bands that way) or never starts the 4-way handshake, the next best
+      access point of that name is tried, up to three more - also when wifid named one BSSID. A wrong password
+      (EAUTH) ends it at once; the first failure is what is reported. Log: "joined the network's access point number N".
+    - Band choice: 5 GHz gets its 15 dB bonus only when heard at -72 dBm or better (was -80: a 5 GHz link that weak
+      is slow and drops while the router's 2.4 GHz is fine); `sweetwl5gmin=N` (dBm below zero). Access points not
+      heard for 30 s rank 100 dB lower (a band that was switched off is not picked while the other is on the air).
+    - Not done: moving to the other band while joined when the signal gets weak (no low-signal roam; only after a
+      lost link does the rejoin pick the best access point again).
+  - **Password audit (user: "make sure network password never get leaked")**, what was checked:
+    - Kernel log (UDP 5140 + the persistent log): no `printf` in sweet_wlsec / sweet_wlce / sweet_wlsta / redwood_sta /
+      redwood_apple80211 / redwood_net prints a passphrase, PMK, PTK, GTK or nonce - only lengths and kinds
+      ("a key of N bytes of kind K"); WMI command bodies (INSTALL_KEY) are not dumped; the assoc-refusal dump holds
+      the AP's elements only. Network names and BSSIDs ARE in the log (that is why live logs stay out of git).
+    - Kernel memory: the ioctl's copies are wiped (memset_s), sweet_wlsta's PMK and sweet_wlsec's state are zeroed
+      after the join / at leave; redwood_sta keeps the last network's key for the rejoin and for a standing request -
+      wiped at Forget / another network, and (new in 0287) when Wi-Fi is switched off.
+    - Apple80211 answers: no request returns a key (CIPHER_KEY is not answered).
+    - Git: no passphrase, PSK or `sweetwlan*pass` boot-arg in the repo; `research/`, `shim/out/`, `backup/` are ignored.
+    - **Weak spots that remain, outside the Wi-Fi driver:** (1) the keychain where wifid saves the password is only
+      wrapped with a fixed XOR pattern (`SweetKeyStore.cpp` kAKSWrapKey, from HackiOS: no SEP, no secret) on an
+      unencrypted HFS+ `userdata` - whoever has the phone (TWRP, the unlocked bootloader) can read saved passwords;
+      (2) the kernel's USB file server (`tools/umi-files.py get`) hands out any file, keychain included, without
+      asking; (3) the passphrase reaches the kernel as typed for a first join (wifid's choice), the PMK afterwards.
+      A device-bound wrap key would raise (1) a little but cannot be a real secret without the SEP / TEE.
+
 - **🎉 2026-11-14 11:20: Wi-Fi 0285/0286 first boot (`shim/out/umi-0286-wlan.img`): 5 GHz joined, 270 Mbit/s on fast.com (user)**
   - **Before (kernel 0284, 2026-11-14, user):** "internet is too goddamn slow on device to run a speedtest" - the speed
     test page could not even run (ADDBA declined, 16 transmit buffers reused blindly, 2 ms poll).
