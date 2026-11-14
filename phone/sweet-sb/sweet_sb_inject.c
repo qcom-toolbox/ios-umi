@@ -199,10 +199,104 @@ sweet_sb_hook(Class c, const char *name, IMP imp)
 	return m != NULL ? method_setImplementation(m, imp) : NULL;
 }
 
+#include <CoreFoundation/CoreFoundation.h>
+#include <VideoToolbox/VideoToolbox.h>
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static intptr_t
+sweet_dsc_slide(void)
+{
+	uint32_t n = _dyld_image_count();
+	for (uint32_t i = 0; i < n; i++) {
+		const char *name = _dyld_get_image_name(i);
+		if (name != NULL && strstr(name, "CMPhoto") != NULL) {
+			return _dyld_get_image_vmaddr_slide(i);
+		}
+	}
+	return _dyld_get_image_vmaddr_slide(1);
+}
+
+extern OSStatus FigSignalErrorAt(OSStatus err, void *a1, void *a2, void *a3,
+    void *a4, void *a5, void *a6, uint32_t a7);
+
+static OSStatus
+sweet_hook_FigSignalErrorAt(OSStatus err, void *a1, void *a2, void *a3,
+    void *a4, void *a5, void *a6, uint32_t a7)
+{
+	if (err != 0 && getenv("SWEET_HEIC_TRACE") != NULL) {
+		uintptr_t ret = (uintptr_t)__builtin_return_address(0);
+		uintptr_t unslid = ret - (uintptr_t)sweet_dsc_slide();
+		fprintf(stderr, "[FigSignalErrorAt] err=%d (0x%x) caller_unslid=0x%llx\n",
+		    (int)err, (unsigned)err, (unsigned long long)unslid);
+	}
+	return FigSignalErrorAt(err, a1, a2, a3, a4, a5, a6, a7);
+}
+
+static OSStatus
+sweet_hook_VTSessionSetProperty(VTSessionRef session, CFStringRef propertyKey, CFTypeRef propertyValue)
+{
+	if (getenv("SWEET_HEIC_TRACE") != NULL && propertyKey != NULL) {
+		char kbuf[128] = {0};
+		CFStringGetCString(propertyKey, kbuf, sizeof(kbuf), kCFStringEncodingUTF8);
+		if (getenv("SWEET_FORCE_SW_TRANSFER") != NULL &&
+		    strcmp(kbuf, "EnableHardwareAcceleratedTransfer") == 0) {
+			fprintf(stderr, "[VTSessionSetProperty] overriding %s -> kCFBooleanFalse\n", kbuf);
+			propertyValue = kCFBooleanFalse;
+		} else {
+			fprintf(stderr, "[VTSessionSetProperty] key=%s val=%p\n", kbuf, (void *)propertyValue);
+		}
+	}
+	return VTSessionSetProperty(session, propertyKey, propertyValue);
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const struct {
+	const void *replacement;
+	const void *original;
+} sweet_interpose[] = {
+	{ (const void *)sweet_hook_FigSignalErrorAt, (const void *)FigSignalErrorAt },
+	{ (const void *)sweet_hook_VTSessionSetProperty, (const void *)VTSessionSetProperty },
+};
+
+static void
+sweet_maybe_run_probe(void)
+{
+	/* xpcproxy has no usable bootstrap port yet: a probe started from it reaches no service */
+	if (strcmp(getprogname(), "xpcproxy") == 0) {
+		return;
+	}
+	if (unlink("/var/tmp/sweet-heic-probe.run") != 0) {
+		return;
+	}
+	int fd = open("/var/tmp/sweet-heic-probe.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		return;
+	}
+	posix_spawn_file_actions_t fa;
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, fd, 1);
+	posix_spawn_file_actions_adddup2(&fa, fd, 2);
+	posix_spawn_file_actions_addclose(&fa, fd);
+	char *argv[] = { "/usr/local/bin/sweet-heic-probe", NULL };
+	char *envp[] = { "PATH=/usr/bin:/bin:/usr/sbin:/sbin", NULL };
+	pid_t pid = 0;
+	if (posix_spawn(&pid, argv[0], &fa, NULL, argv, envp) == 0) {
+		int st = 0;
+		waitpid(pid, &st, 0);
+	}
+	posix_spawn_file_actions_destroy(&fa);
+	close(fd);
+}
+
 __attribute__((constructor))
 static void
 sweet_sb_init(void)
 {
+	sweet_maybe_run_probe();
 	Class c = objc_getClass("_UIStatusBarVisualProvider_Split1125");
 	if (c == Nil) {
 		return;                     /* no UIKit in this program */

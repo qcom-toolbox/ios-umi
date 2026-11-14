@@ -9,6 +9,7 @@ sdk=$(xcrun --sdk iphoneos --show-sdk-path)
 mkdir -p phone/out
 xcrun --sdk iphoneos clang -arch arm64 -isysroot "$sdk" -miphoneos-version-min=16.0 \
     -O2 -Wall -Wextra -Werror -dynamiclib -install_name /usr/local/lib/libsweet-sb.dylib -lobjc \
+    -framework CoreFoundation -framework VideoToolbox -framework CoreMedia \
     -o phone/out/libsweet-sb.dylib phone/sweet-sb/sweet_sb_inject.c
 /opt/local/bin/ldid -S phone/out/libsweet-sb.dylib
 echo "built phone/out/libsweet-sb.dylib"
