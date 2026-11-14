@@ -1,0 +1,32 @@
+From 7b9dbfed92efa0bb6787ae08d7b7c9ee832af61f Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 20:01:08 +0100
+Subject: [PATCH] umi: IOSurface (0300): plane bytes per row also at +0x10 of
+ the plane entry, where IOSurface.framework reads it - planar surfaces
+ reported 0 and CoreVideo refused them (-6661), so no HEIC decoded
+
+---
+ iokit/Kernel/arm/SweetSurface.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 9ef6f54..58e8e05 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -791,6 +791,13 @@ sweet_surface_fill_result(SweetSurface *s, SweetSurfaceRef *ref, uint8_t *out)
+ 		put32(p, 0x04, pl->height);
+ 		put32(p, 0x08, pl->bytesPerRow);
+ 		put32(p, 0x0c, pl->offset);
++		/*
++		 * (0300) IOSurfaceClientGetBytesPerRowOfPlane reads +0x10 of the plane entry (client +0xe0 =
++		 * result +0x68 + 0x10), not +0x08: every plane reported 0 bytes per row, and CoreVideo refused
++		 * planar buffers (checkIOSurfaceAndCreatePixelBufferBacking: kCVReturnInvalidArgument -6661),
++		 * which is how every HEIC decode (YCbCr tiles) failed. +0x08 is kept as it was.
++		 */
++		put32(p, 0x10, pl->bytesPerRow);
+ 		put32(p, 0x14, pl->size);
+ 		memcpy(p + 0x18, &pl->bytesPerElement, 2);
+ 		p[0x1a] = pl->elementWidth;
+-- 
+2.54.0 (Apple Git-157)
+

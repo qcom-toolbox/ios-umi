@@ -1,0 +1,44 @@
+From f1ff0c69a7f16b54267c2d110e19b966bd0d089c Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 19:04:27 +0100
+Subject: [PATCH] umi: IOSurface (0299): sel 13 reports the maxima
+ (width/height 16384, 262144 bytes per row) - they were 0, so CMPhoto failed
+ every HEIC decode with kCVReturnInvalidArgument
+
+---
+ iokit/Kernel/arm/SweetSurface.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 172b887..9ef6f54 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -6,7 +6,8 @@
+  * talks to the user client below:
+  *
+  *   sel 13  limits: struct out 0x18, u16 at +0x16 must be 1 (ABI version),
+- *           +0 offset alignment mask, +4 bytes-per-row alignment mask
++ *           +0 offset alignment mask, +4 bytes-per-row alignment mask,
++ *           +8 max bytes per row, +0xc max width, +0x10 max height
+  *   sel 0   create: scalar [parent id], struct in = serialized property
+  *           dictionary (binary or XML), struct out = lock result (0xa68)
+  *   sel 4   lookup by id: scalar [id], struct out = lock result
+@@ -1331,6 +1332,15 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		uint8_t limits[0x18] = { 0 };
+ 		put32(limits, 0x0, SWEET_SURFACE_ROW_ALIGN - 1);
+ 		put32(limits, 0x4, SWEET_SURFACE_ROW_ALIGN - 1);
++		/*
++		 * (0299) maxima, read by IOSurfaceGetPropertyMaximum (IOSurfaceClientGetPropertyMaximum):
++		 * +8 bytes per row, +0xc width, +0x10 height (also the plane keys). They were 0, and CMPhoto
++		 * (every HEIC decode) failed with kCVReturnInvalidArgument (-6661) before allocating anything.
++		 * The values are what create() accepts: 16384 pixels, 16 bytes per pixel per row.
++		 */
++		put32(limits, 0x8, SWEET_SURFACE_MAX_DIM * 16);
++		put32(limits, 0xc, SWEET_SURFACE_MAX_DIM);
++		put32(limits, 0x10, SWEET_SURFACE_MAX_DIM);
+ 		limits[0x16] = 1;
+ 		sweet_surf_log_once("sel", selector);
+ 		return sweet_struct_out(args, limits, sizeof(limits));
+-- 
+2.54.0 (Apple Git-157)
+

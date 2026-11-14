@@ -2,6 +2,50 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 20:10: HEIC DECODES (kernel 0300, probe-verified)** (patches `xnu/patches/0299-umi-iosurface-limits.patch`,
+  `0300-umi-iosurface-plane-bpr.patch`, kernel f1ff0c6 + 7b9dbfe, image **`shim/out/umi-0300-surface-planes.img`** =
+  0298's boot line exactly + 0299 + 0300).
+  - **Cause: SweetSurface wrote each plane's bytes per row at +0x08 of the plane entry in the lock result;
+    IOSurface.framework reads it at +0x10** (`IOSurfaceClientGetBytesPerRowOfPlane`: client +0xe0 = result +0x68 +
+    plane*0x80 + 0x10). Every multi-plane surface (420f/420v/x420...) reported 0 bytes per row per plane; CoreVideo's
+    `checkIOSurfaceAndCreatePixelBufferBacking` compares them with the requested / exact bytes per row and returns
+    kCVReturnInvalidArgument (-6661) - CMPhoto's HEVC tiles are YCbCr, so every HEIC failed. 0300 also writes +0x10
+    (+0x08 kept). Plane entry as the framework reads it: +0 width, +4 height, +0xc offset, +0x10 bytes per row,
+    +0x14 size, +0x18 bytes per element (u16), +0x1a/+0x1b element width/height, +0x1c component count, components
+    from +0x20; +0x54 (client +0x124) = compressed flag.
+  - 0299 (also real, not the HEIC cause): sel 13 limits had max bytes per row / width / height = 0 (+8/+0xc/+0x10)
+    -> `IOSurfaceGetPropertyMaximum` returned 0; now 262144 / 16384 / 16384 (SWEET_SURFACE_MAX_DIM).
+  - Probe on 0300: `plane 0 1105x1160 bpr 1152 | plane 1 553x580 bpr 1152`, `CMPhotoDecompressionContainerCreateImageForIndex
+    -> 0`, Head.HEIC -> 5127200 bytes, 3.5 M non-zero. User: App Library blur "kinda" fixed too (planar surfaces in
+    CoreAnimation's blur path, likely same bug).
+  - The earlier "remote decode -12911" was the probe's launch context: started from libsweet-sb inside xpcproxy it
+    had no usable bootstrap port (every bootstrap_look_up -> 0x10000003). The launcher now skips xpcproxy; started from
+    a normal program, remote sessions work (mediaserverd's decoder works too, tested with libsweet-heic-mstest in it).
+  - Phone state: `/usr/local/lib/libsweet-sb.dylib` = Gemini's HEIC-debug build (interposes FigSignalErrorAt /
+    VTSessionSetProperty in every program + the probe launcher, working tree only) + the xpcproxy skip;
+    `/usr/local/bin/sweet-heic-probe`, `/usr/local/lib/libsweet-heic-trace.dylib`, `libsweet-heic-mstest.dylib` are test
+    files; iOS 16 wallpaper still uses the PNG stopgap (originals in `main.caml.sweet-orig`).
+
+- **2026-11-14 19:05: HEIC decode investigation (superseded by the 20:10 entry)** - tools `phone/build-heic-trace.sh`,
+  `phone/heic-trace/` (program installed as `/usr/local/bin/sweet-heic-probe`, `/usr/local/lib/libsweet-heic-trace.dylib`;
+  run: create `/var/tmp/sweet-heic-probe.run`, the next program start runs it through the launcher Gemini added to the
+  phone's libsweet-sb (uncommitted working-tree change), log `/var/tmp/sweet-heic-probe.log`).
+  - ImageIO -> CMPhoto -> VideoToolbox. iOS registers a software HEVC decoder unconditionally (`VCPHEVC.videocodec`,
+    `VCPHEVCRegisterDecoder`); the hardware ones (H264H8 `AppleD5500CheckPlatform`, AVD) correctly stay unregistered.
+  - VTDecompressionSessionCreate for the image's own hvcC: **remote (default, decoder in mediaserverd,
+    `com.apple.coremedia.decompressionsession.xpc`) -> -12911 (decoder malfunction) whatever the restriction bits;
+    in-process (`VTApplyRestrictions` bit 0 = `sVTRunVideoDecodersInProcess`) -> 0**, also with IOSurface output.
+    Bits: 0 run decoders in process, 1 avoid hardware decoders, 2 avoid IOSurface backings, 3 avoid hardware pixel
+    transfer (`_sVTAvoid...` at 0x1dd2bd740 + 3/2/1/0).
+  - ImageIO's CMPhoto calls go through dlsym'd pointers (`gFunc_CMPhoto...`, writable): wrapped, they give
+    `CMPhotoDecompressionContainerCreateImageForIndex` **-12911 by default and -6661 (kCVReturnInvalidArgument) with
+    in-process decoding** (any other bit combination: -6661). The kernel saw no IOSurface create from the probe, so
+    -6661 happens before any surface allocation.
+  - `IOSurfaceAcceleratorCreate` -> 0xe00002c0 (no AppleM2ScalerCSCDriver) only in VT's capability probe
+    (`FigRegisterIOSurfacePixelTransferCapabilityOnce`), which skips registration cleanly: not the failure itself.
+  - Dead ends: dyld interposing does not see calls between shared-cache libraries (direct branches), and rewriting
+    CMPhoto's pointer tables found nothing; `log show` cannot read a partial copy of the phone's tracev3 files.
+
 - **2026-11-14 16:30: the iOS 16 wallpaper is plain blue because no HEIC image decodes; file server 0298 takes paths
   with spaces and shortens overwritten files (0298 user-booted, file tests passed)** (patch
   `xnu/patches/0298-umi-files-spaces-truncate.patch`, kernel fdf61b1, image **`shim/out/umi-0298-files-spaces.img`** =
