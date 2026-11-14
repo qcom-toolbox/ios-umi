@@ -1,0 +1,125 @@
+From 8be4abe7860b92f24b9f7f235db61b7cf48e91b2 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:39:37 +0100
+Subject: [PATCH] umi: keychain (0289): the wrap key comes from the chip's
+ socinfo record in SMEM (SoC id, raw id, foundry, serial number), not from
+ reading the QFPROM rows - the 0288 boot panicked early
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_slpi.c               | 26 ++++++++++++++++++++
+ iokit/Kernel/arm/SweetKeyStore.cpp | 38 +++++++++++++-----------------
+ 2 files changed, 43 insertions(+), 21 deletions(-)
+
+diff --git a/bsd/dev/sweet_slpi.c b/bsd/dev/sweet_slpi.c
+index 250aaf8..c74939f 100644
+--- a/bsd/dev/sweet_slpi.c
++++ b/bsd/dev/sweet_slpi.c
+@@ -313,6 +313,32 @@ sl_smem_get(uint16_t a, uint16_t b, uint16_t item, uint32_t *size)
+ 	return 0;
+ }
+ 
++#if !SL_EDGE_ADSP
++/*
++ * 0288b: what tells this chip from every other, for SweetKeyStore.cpp's wrap key: the bootloader's
++ * socinfo record in SMEM (global item 137, Linux socinfo.c: SoC id at +4, raw id +44, foundry +92,
++ * serial number +96 from format 0.10 on). Plain shared RAM, read only. The four words, or false.
++ */
++bool sweet_soc_identity(uint32_t out[4]);
++
++bool
++sweet_soc_identity(uint32_t out[4])
++{
++	if (sl_smem == NULL && sweet_dsp_io_map(SL_SMEM, SL_SMEM_SIZE) == 0) {
++		return false;
++	}
++	uint32_t size = 0, it = sl_smem_get(0xfffe, 0xfffe, 137, &size);
++	if (it == 0 || size < 100 || it + 100 > SL_SMEM_SIZE || (sl_rd32(it) & 0xffffu) < 10) {
++		return false;
++	}
++	out[0] = sl_rd32(it + 4);
++	out[1] = sl_rd32(it + 44);
++	out[2] = sl_rd32(it + 92);
++	out[3] = sl_rd32(it + 96);
++	return out[3] != 0;
++}
++#endif
++
+ /*
+  * The SLPI's SMP2P entry "slave-kernel" (item 481, between hosts 0 and 3), or ~0. Linux
+  * smp2p.c reads dt qcom,smem = <481 430> as { inbound, outbound }.
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index 9ead983..ec7635d 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -30,7 +30,7 @@ extern "C" {
+ #include <libkern/crypto/aes.h>
+ #include <libkern/crypto/sha2.h>
+ }
+-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" bool sweet_soc_identity(uint32_t out[4]);
+ 
+ /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
+ enum {
+@@ -130,12 +130,12 @@ sweet_aks_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t
+  * 0288: the key that wraps keychain item keys, bound to this phone. Until now kAKSWrapKey mixed the
+  * item key with a fixed pattern (mark "HKwr"): whoever copied the keychain file off the phone had every
+  * saved password (Wi-Fi ones among them). Now: AES-256 key wrap (RFC 3394, as the real key store's
+- * output: 8 bytes longer) under SHA-256("sweet-aks-wrap-v2" || this chip's fuse rows), the SoC's QFPROM
+- * corrected rows at 0x784000-0x786fff (serial number, calibration: different on every chip, not on the
+- * disk). A copied disk image is then useless without this very phone. It is NOT a secret from someone
+- * who has the phone itself and can run code on it (no SEP / TEE here).
++ * output: 8 bytes longer) under SHA-256("sweet-aks-wrap-v2" || this chip's SoC id, raw id, foundry and
++ * serial number), which are not on the disk. A copied disk image alone no longer opens the items. It is
++ * NOT a secret from someone who has the phone and can run code on it (no SEP / TEE here), and the
++ * serial number is only 32 bits: it stops reading a copy, not a determined search.
+  * Old "HKwr" items still unwrap; item keys that RFC 3394 cannot take (not 16+ bytes in whole 8s), a chip
+- * whose fuses read empty, a failed self-test or boot-arg sweetaksv=1 keep the old form.
++ * without a socinfo serial number, a failed self-test or boot-arg sweetaksv=1 keep the old form.
+  */
+ static uint8_t sweet_aks_kek[32];
+ static int sweet_aks_kek_state;                 /* 0 not tried, 1 ready, -1 the old form stays */
+@@ -231,29 +231,25 @@ sweet_aks_kek_ready(void)
+ 		IOLog("SWEET AKS: keychain wrap: AES key wrap self-test FAILED, the old form stays\n");
+ 		return false;
+ 	}
+-	vm_offset_t fuses = ml_io_map(0x00784000, 0x3000);
+-	if (fuses == 0) {
+-		IOLog("SWEET AKS: keychain wrap: the fuse rows cannot be mapped, the old form stays\n");
++	/*
++	 * 0288b: the chip's identity from the bootloader's socinfo record (sweet_slpi.c), not the fuse rows
++	 * themselves: the first 0288 read QFPROM 0x784000-0x786fff word by word and the phone panicked early
++	 * in boot (some rows are not readable from here).
++	 */
++	uint32_t id[4] = { 0, 0, 0, 0 };
++	if (!sweet_soc_identity(id)) {
++		IOLog("SWEET AKS: keychain wrap: no socinfo record with a serial number, the old form stays\n");
+ 		return false;
+ 	}
+ 	static const char label[] = "sweet-aks-wrap-v2";
+ 	SHA256_CTX sha;
+-	unsigned set = 0;
+ 	SHA256_Init(&sha);
+ 	SHA256_Update(&sha, label, sizeof(label));
+-	for (uint32_t off = 0; off < 0x3000; off += 4) {
+-		uint32_t w = *(volatile uint32_t *)(fuses + off);
+-		set += w != 0;
+-		SHA256_Update(&sha, &w, sizeof(w));
+-	}
++	SHA256_Update(&sha, id, sizeof(id));
+ 	SHA256_Final(sweet_aks_kek, &sha);
+-	if (set < 8) {
+-		bzero(sweet_aks_kek, sizeof(sweet_aks_kek));
+-		IOLog("SWEET AKS: keychain wrap: only %u fuse words are set (nothing of this chip's own), the old form stays\n", set);
+-		return false;
+-	}
++	bzero(id, sizeof(id));
+ 	sweet_aks_kek_state = 1;
+-	IOLog("SWEET AKS: keychain wrap: AES-256 key wrap under a key of this chip's fuses (%u words set); old items still open\n", set);
++	IOLog("SWEET AKS: keychain wrap: AES-256 key wrap under a key of this chip's identity; old items still open\n");
+ 	return true;
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

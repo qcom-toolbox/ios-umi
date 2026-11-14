@@ -2,6 +2,21 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: keychain 0289: 0288 panicked on its first boot; the wrap key now comes from socinfo** (patch
+  `xnu/patches/0289-umi-keychain-socinfo-key.patch`, kernel 8be4abe, image **`shim/out/umi-0289-keychain.img`** =
+  0286's line; booted 11:4x, result pending).
+  - **0288 (`umi-0288-keychain.img`): kernel panic early in boot, phone rebooted (user); no log** (the USB Ethernet
+    address was not set yet, no photo). Cause not proven. Suspect: 0288's only new early hardware access, the
+    word-by-word read of QFPROM 0x784000-0x786fff for the wrap key at securityd's first kAKSWrapKey (the GPU code
+    only ever reads 0x78419b and 0x7845c8; other rows are probably not readable from the kernel). The crypto is not
+    it: libkern's AES / SHA-256 here are the BearSSL / ltc ones sweet_wlsec already uses. **Do not boot 0288.**
+  - 0289: the key is SHA-256("sweet-aks-wrap-v2" || SoC id, raw id, foundry id, serial number) from the bootloader's
+    socinfo record (SMEM global item 137 at 0x80900000, plain RAM; new `sweet_soc_identity` in sweet_slpi.c). No
+    socinfo / serial 0 -> the old form stays. Weaker than fuse rows would have been: the serial number is 32 bits, so
+    the wrap stops someone reading a copied keychain file, not a determined search with the disk image in hand.
+  - If 0289 panics too, the cause is elsewhere (0287's join changes only run at a join, ~2 min after boot): get the
+    panic text (USB log or `tools/umi-log-pull.sh` from TWRP) before anything else.
+
 - **2026-11-14: keychain 0288: saved passwords wrapped under a key bound to this phone** (patch
   `xnu/patches/0288-umi-keychain-device-bound-wrap.patch`, kernel ee8950d, image **`shim/out/umi-0288-keychain.img`**
   = 0286's line, includes 0287; **built, not booted**).
