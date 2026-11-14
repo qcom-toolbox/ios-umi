@@ -36,6 +36,15 @@
       join was turned down by the AP (EAUTH under 0290's stricter rule: message 1 repeated or a deauth), and 41 s
       after that one worked. What the user did between them is not known yet (another saved network? password
       typed again?), and the first join only came 326 s after boot (en0 is up at ~100 s).
+    - **User, about that boot: "first try failed, I had to forget the password and rejoin it, then it worked"; no
+      reboot tried since.** So join 1 (saved key, -> 0 at the radio: handshake done, keys in) still looked failed to
+      the user, join 2 (-> 80) is the retry that the AP turned down, join 3 the password typed again. Open: what
+      happened between join 1 and join 2 (the link lost after ~60 s? wifid leaving? no DHCP?) - not in the history.
+  - **0291** (patch `xnu/patches/0291-umi-wlan-join-history-losses.patch`, image **`shim/out/umi-0291-wifi-history.img`**,
+    built, not booted): the history also holds link losses with their reason (`event N ...: the link was LOST
+    (0xc0000f)` = deauthentication, reason 15) and leaves asked for by wifid, 12 entries; EAUTH after a deauth only
+    for reasons 2 / 14 / 15 / 23. Next: boot it, run `umi-usbnet.sh` about 2 min after boot (the first join comes at
+    ~5 min) so the boot-time join is in the live log, touch nothing until it has tried.
 
 - **2026-11-14 11:45: Wi-Fi on 0289, first log of a join: VHT80, 2 streams, block ack accepted; auto-join works after
   the Wi-Fi switch, not after a reboot (open)**
