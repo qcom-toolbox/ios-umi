@@ -2,6 +2,23 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: keychain 0288: saved passwords wrapped under a key bound to this phone** (patch
+  `xnu/patches/0288-umi-keychain-device-bound-wrap.patch`, kernel ee8950d, image **`shim/out/umi-0288-keychain.img`**
+  = 0286's line, includes 0287; **built, not booted**).
+  - `SweetKeyStore.cpp` kAKSWrapKey / kAKSUnwrapKey: AES-256 key wrap (RFC 3394, output 8 bytes longer as before) under
+    SHA-256("sweet-aks-wrap-v2" || the SoC's QFPROM corrected rows 0x784000-0x786fff) instead of the fixed XOR
+    pattern. The fuse rows (serial number, calibration) differ on every chip and are not on the disk: a copy of
+    `userdata` or of the keychain file no longer gives the saved passwords without this very phone.
+  - Limits: no SEP / TEE, so whoever has the phone and can run code on it (the unlocked bootloader, the USB file
+    server plus a kernel of their own) can still derive the key. Items saved before 0288 keep the old "HKwr" form
+    until securityd rewraps them (a network forgotten and joined again is saved in the new form).
+  - Safety nets: the old form still unwraps (told apart by its mark; ours by RFC 3394's check value); the old form is
+    still written for item keys that are not 16+ bytes in whole 8s, when the RFC 3394 4.6 self-test fails, when
+    fewer than 8 fuse words are set, or with boot-arg `sweetaksv=1`.
+  - To check on the first boot: the line `SWEET AKS: keychain wrap: AES-256 key wrap under a key of this chip's fuses
+    (N words set)`; Wi-Fi joins the saved network by itself (old item unwraps); Forget + join again, reboot, joins
+    by itself (new item unwraps); Bluetooth pairings and accounts still there.
+
 - **2026-11-14: Wi-Fi 0287: dual-band names, and a check that the network password does not leak** (patch
   `xnu/patches/0287-umi-wlan-dual-band-join.patch`, kernel b346f2a, image **`shim/out/umi-0287-dualband.img`** = 0286's
   line; **built, not booted**: the user has no dual-band network at hand).
@@ -31,7 +48,7 @@
       unencrypted HFS+ `userdata` - whoever has the phone (TWRP, the unlocked bootloader) can read saved passwords;
       (2) the kernel's USB file server (`tools/umi-files.py get`) hands out any file, keychain included, without
       asking; (3) the passphrase reaches the kernel as typed for a first join (wifid's choice), the PMK afterwards.
-      A device-bound wrap key would raise (1) a little but cannot be a real secret without the SEP / TEE.
+      (1) is narrowed by 0288 (entry above).
 
 - **🎉 2026-11-14 11:20: Wi-Fi 0285/0286 first boot (`shim/out/umi-0286-wlan.img`): 5 GHz joined, 270 Mbit/s on fast.com (user)**
   - **Before (kernel 0284, 2026-11-14, user):** "internet is too goddamn slow on device to run a speedtest" - the speed

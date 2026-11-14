@@ -136,5 +136,6 @@
 * **RAM**: ~7 GB by moving our DSP / Wi-Fi buffers into free low RAM (0x92700000-0xb03fffff) and starting iOS at 0xc0000000
 * **Charging**: why a 3 A USB-PD charger only gives ~+0.6 A (AICL?); QC 3.0 test with a QC charger; USB-PD and the SMB1390 charge pump for 30 W
 * **Audio**: check that the speaker still plays with the plug-in's hardware volume control removed (installed, not yet loaded)
-* **Wi-Fi**: boot 0287 (`umi-0287-dualband.img`) on a dual-band network (one name on 2.4 + 5 GHz) and say what goes wrong, if anything still does; then test: upload rate, rejoin after a lost link, reconnect after reboot / sleep, hidden networks, Forget + rejoin, roaming; WPA3-SAE (needs P-256 ECC + PMF)
+* **Keychain**: boot 0288 (`umi-0288-keychain.img`) and check that saved Wi-Fi networks, Bluetooth pairings and accounts survive, then that a newly saved network survives a reboot
+* **Wi-Fi**: boot 0287 or later (`umi-0288-keychain.img`) on a dual-band network (one name on 2.4 + 5 GHz) and say what goes wrong, if anything still does; then test: upload rate, rejoin after a lost link, reconnect after reboot / sleep, hidden networks, Forget + rejoin, roaming; WPA3-SAE (needs P-256 ECC + PMF)
 * **GPS**, **Fingerprint**, **Face ID / SEP**, **NFC**, **Wireless charging**

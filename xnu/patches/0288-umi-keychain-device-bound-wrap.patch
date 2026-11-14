@@ -1,0 +1,208 @@
+From ee8950d58ac5fc6d3f2d6ee96affe79c04eb80b8 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:34:10 +0100
+Subject: [PATCH] umi: keychain (0288): item keys wrapped with AES-256 key wrap
+ (RFC 3394) under a key made of this chip's fuse rows (was: a fixed pattern);
+ old items still unwrap; self-test, sweetaksv=1 = old form
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetKeyStore.cpp | 161 ++++++++++++++++++++++++++++-
+ 1 file changed, 160 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index 73d9267..9ead983 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -24,6 +24,13 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
++#include <pexpert/pexpert.h>
++#include <machine/machine_routines.h>
++extern "C" {
++#include <libkern/crypto/aes.h>
++#include <libkern/crypto/sha2.h>
++}
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
+ enum {
+@@ -119,6 +126,137 @@ sweet_aks_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t
+ 	return kIOReturnSuccess;
+ }
+ 
++/*
++ * 0288: the key that wraps keychain item keys, bound to this phone. Until now kAKSWrapKey mixed the
++ * item key with a fixed pattern (mark "HKwr"): whoever copied the keychain file off the phone had every
++ * saved password (Wi-Fi ones among them). Now: AES-256 key wrap (RFC 3394, as the real key store's
++ * output: 8 bytes longer) under SHA-256("sweet-aks-wrap-v2" || this chip's fuse rows), the SoC's QFPROM
++ * corrected rows at 0x784000-0x786fff (serial number, calibration: different on every chip, not on the
++ * disk). A copied disk image is then useless without this very phone. It is NOT a secret from someone
++ * who has the phone itself and can run code on it (no SEP / TEE here).
++ * Old "HKwr" items still unwrap; item keys that RFC 3394 cannot take (not 16+ bytes in whole 8s), a chip
++ * whose fuses read empty, a failed self-test or boot-arg sweetaksv=1 keep the old form.
++ */
++static uint8_t sweet_aks_kek[32];
++static int sweet_aks_kek_state;                 /* 0 not tried, 1 ready, -1 the old form stays */
++
++static bool
++sweet_aks_wrap3394(const uint8_t kek[32], const uint8_t *in, size_t len, uint8_t *out)
++{
++	aes_encrypt_ctx ctx;
++	uint8_t a[8], b[16];
++	size_t n = len / 8;
++	if (len < 16 || len % 8 || aes_encrypt_key256(kek, &ctx) != aes_good) {
++		return false;
++	}
++	memset(a, 0xa6, 8);
++	memmove(out + 8, in, len);
++	for (unsigned j = 0; j < 6; j++) {
++		for (size_t i = 1; i <= n; i++) {
++			uint64_t t = n * j + i;
++			memcpy(b, a, 8);
++			memcpy(b + 8, out + 8 * i, 8);
++			aes_encrypt(b, b, &ctx);
++			memcpy(a, b, 8);
++			for (unsigned k = 0; k < 8; k++) {
++				a[7 - k] ^= (uint8_t)(t >> (8 * k));
++			}
++			memcpy(out + 8 * i, b + 8, 8);
++		}
++	}
++	memcpy(out, a, 8);
++	bzero(&ctx, sizeof(ctx));
++	bzero(b, sizeof(b));
++	return true;
++}
++
++/* in: len bytes (24+, whole 8s); out: len - 8 bytes; false when the check value is wrong (not ours, or damaged) */
++static bool
++sweet_aks_unwrap3394(const uint8_t kek[32], const uint8_t *in, size_t len, uint8_t *out)
++{
++	aes_decrypt_ctx ctx;
++	uint8_t a[8], b[16], bad = 0;
++	size_t n = len / 8 - 1;
++	if (len < 24 || len % 8 || aes_decrypt_key256(kek, &ctx) != aes_good) {
++		return false;
++	}
++	memcpy(a, in, 8);
++	memmove(out, in + 8, len - 8);
++	for (int j = 5; j >= 0; j--) {
++		for (size_t i = n; i >= 1; i--) {
++			uint64_t t = n * (unsigned)j + i;
++			for (unsigned k = 0; k < 8; k++) {
++				a[7 - k] ^= (uint8_t)(t >> (8 * k));
++			}
++			memcpy(b, a, 8);
++			memcpy(b + 8, out + 8 * (i - 1), 8);
++			aes_decrypt(b, b, &ctx);
++			memcpy(a, b, 8);
++			memcpy(out + 8 * (i - 1), b + 8, 8);
++		}
++	}
++	for (unsigned k = 0; k < 8; k++) {
++		bad |= a[k] ^ 0xa6;
++	}
++	bzero(&ctx, sizeof(ctx));
++	bzero(b, sizeof(b));
++	return bad == 0;
++}
++
++static bool
++sweet_aks_kek_ready(void)
++{
++	if (sweet_aks_kek_state != 0) {
++		return sweet_aks_kek_state > 0;
++	}
++	uint32_t form = 2;
++	(void)PE_parse_boot_argn("sweetaksv", &form, sizeof(form));
++	sweet_aks_kek_state = -1;
++	if (form < 2) {
++		IOLog("SWEET AKS: keychain wrap: the old fixed-pattern form (sweetaksv=%u)\n", form);
++		return false;
++	}
++	/* RFC 3394 4.6: 256-bit KEK 00..1f, key data 00112233445566778899aabbccddeeff */
++	static const uint8_t want[24] = { 0x64, 0xe8, 0xc3, 0xf9, 0xce, 0x0f, 0x5b, 0xa2, 0x63, 0xe9, 0x77, 0x79, 0x05, 0x81, 0x8a, 0x2a,
++		                          0x93, 0xc8, 0x19, 0x1e, 0x7d, 0x6e, 0x8a, 0xe7 };
++	uint8_t tk[32], td[16], tw[24], tb[16];
++	for (unsigned i = 0; i < 32; i++) {
++		tk[i] = (uint8_t)i;
++	}
++	for (unsigned i = 0; i < 16; i++) {
++		td[i] = (uint8_t)(i * 0x11);
++	}
++	if (!sweet_aks_wrap3394(tk, td, 16, tw) || memcmp(tw, want, 24) != 0 || !sweet_aks_unwrap3394(tk, tw, 24, tb) ||
++	    memcmp(tb, td, 16) != 0) {
++		IOLog("SWEET AKS: keychain wrap: AES key wrap self-test FAILED, the old form stays\n");
++		return false;
++	}
++	vm_offset_t fuses = ml_io_map(0x00784000, 0x3000);
++	if (fuses == 0) {
++		IOLog("SWEET AKS: keychain wrap: the fuse rows cannot be mapped, the old form stays\n");
++		return false;
++	}
++	static const char label[] = "sweet-aks-wrap-v2";
++	SHA256_CTX sha;
++	unsigned set = 0;
++	SHA256_Init(&sha);
++	SHA256_Update(&sha, label, sizeof(label));
++	for (uint32_t off = 0; off < 0x3000; off += 4) {
++		uint32_t w = *(volatile uint32_t *)(fuses + off);
++		set += w != 0;
++		SHA256_Update(&sha, &w, sizeof(w));
++	}
++	SHA256_Final(sweet_aks_kek, &sha);
++	if (set < 8) {
++		bzero(sweet_aks_kek, sizeof(sweet_aks_kek));
++		IOLog("SWEET AKS: keychain wrap: only %u fuse words are set (nothing of this chip's own), the old form stays\n", set);
++		return false;
++	}
++	sweet_aks_kek_state = 1;
++	IOLog("SWEET AKS: keychain wrap: AES-256 key wrap under a key of this chip's fuses (%u words set); old items still open\n", set);
++	return true;
++}
++
+ /* Append SEQUENCE { UTF8String key, INTEGER value } (short forms only). */
+ static uint32_t
+ sweet_aks_der_pair(uint8_t *p, const char *key, uint8_t value)
+@@ -240,6 +378,15 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
++		if (sweet_aks_kek_ready() && sweet_aks_wrap3394(sweet_aks_kek, (const uint8_t *)args->structureInput, len, wrapped)) {
++			if (out_scalars >= 1) {
++				args->scalarOutput[0] = args->scalarInput[1];
++				args->scalarOutputCount = 1;
++			}
++			ret = sweet_aks_struct_out(args, wrapped, (uint32_t)(8 + len));
++			bzero(wrapped, sizeof(wrapped));
++			break;
++		}
+ 		memcpy(wrapped, "HKwr", 4);
+ 		wrapped[4] = (uint8_t)args->scalarInput[1];
+ 		wrapped[5] = wrapped[6] = wrapped[7] = 0;
+@@ -258,7 +405,19 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		uint8_t key[64];
+ 		const uint8_t *w = (const uint8_t *)args->structureInput;
+ 		size_t len = args->structureInputSize;
+-		if (w == NULL || len <= 8 || len > 8 + sizeof(key) || memcmp(w, "HKwr", 4) != 0) {
++		if (w == NULL || len <= 8 || len > 8 + sizeof(key)) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		/* 0288: ours under the chip's key (the check value tells), else the old "HKwr" form */
++		if (!(memcmp(w, "HKwr", 4) == 0 && w[5] == 0 && w[6] == 0 && w[7] == 0) && sweet_aks_kek_ready() &&
++		    sweet_aks_unwrap3394(sweet_aks_kek, w, len, key)) {
++			args->scalarOutputCount = 0;
++			ret = sweet_aks_struct_out(args, key, (uint32_t)(len - 8));
++			bzero(key, sizeof(key));
++			break;
++		}
++		if (memcmp(w, "HKwr", 4) != 0) {
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
+-- 
+2.54.0 (Apple Git-157)
+
