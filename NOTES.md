@@ -2,6 +2,22 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 11:45: Wi-Fi on 0289, first log of a join: VHT80, 2 streams, block ack accepted; auto-join works after
+  the Wi-Fi switch, not after a reboot (open)**
+  - Log (scratchpad umi-0286-live.log, not in git): join on channel 40 (5200 MHz), 80 MHz around 5210, `peer assoc:
+    phymode 10 (11ac VHT80), 80 MHz, 2 stream(s)`, 4-way handshake and keys in ~1 s, then `ADDBA from the AP: TID 6 /
+    TID 0, window 64 asked ... ACCEPTED (window 64, REO/WMI 0, answer sent 0)`: the REO command ring works (status 0)
+    and the AP aggregates towards us. No "REO cache flushes did not complete" at the leave.
+  - User: Wi-Fi off / on in Settings -> joins the saved network by itself (log: power 0 / 1, wifid's scans, join -> 0).
+    **After a reboot it does not: the user has to forget the network and join again, every reboot.** The boot window
+    is not in any log (the USB Ethernet gadget dropped at ~90 s on each boot today, and again a few minutes after
+    `umi-usbnet.sh` was re-run). Not known yet: whether tapping the network after a reboot asks for the password
+    (= the keychain item or the known-network entry did not reach the disk before the reset: the phone is reset from
+    the buttons, nothing syncs) or joins at once (= wifid's auto-join at boot does not start: en0 appears ~90 s
+    after wifid).
+  - User, same boot: "metal became glitchy" - since which kernel is not known (0286 or 0289); no GPU file was
+    touched by 0285-0289.
+
 - **2026-11-14: keychain 0289: 0288 panicked on its first boot; the wrap key now comes from socinfo** (patch
   `xnu/patches/0289-umi-keychain-socinfo-key.patch`, kernel 8be4abe, image **`shim/out/umi-0289-keychain.img`** =
   0286's line).
