@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <dlfcn.h>
 
 #define SWEET_SB_DX 44.0            /* points: clock centre from ~41 pt to ~85 pt, clear of the hole (to 57 pt) */
 #define SWEET_KB_INSET 12.0         /* points kept free of keys on each side of the keyboard */
@@ -292,11 +293,43 @@ sweet_maybe_run_probe(void)
 	close(fd);
 }
 
+static IMP sweet_sb_orig_init;
+static id
+sweet_sb_app_init(id self, SEL cmd)
+{
+	/* Load UIKit-linked extensions after framework +load entitlement checks. */
+	FILE *f = fopen("/var/tmp/sweet-island-loader.log", "a");
+	void *handle = dlopen("/usr/local/lib/libsweet-island.dylib", RTLD_NOW | RTLD_LOCAL);
+	if (f != NULL) {
+		fprintf(f, "UIApplication init: %s island %s\n", object_getClassName(self), handle ? "loaded" : dlerror());
+		fclose(f);
+	}
+	return ((id (*)(id, SEL))sweet_sb_orig_init)(self, cmd);
+}
+
 __attribute__((constructor))
 static void
 sweet_sb_init(void)
 {
 	sweet_maybe_run_probe();
+	/* Optional native Dynamic Island adapter, confined to SpringBoard. */
+	if (strcmp(getprogname(), "SpringBoard") == 0) {
+		/* UIKit is registered here; SpringBoard's image may not be registered yet. */
+		Class sb = objc_getClass("UIApplication");
+		SEL init = sel_registerName("init");
+		Method m = class_getInstanceMethod(sb, init);
+		FILE *f = fopen("/var/tmp/sweet-island-loader.log", "w");
+		if (f != NULL) {
+			fprintf(f, "UIApplication %p init %p\n", (void *)sb, (void *)m);
+			fclose(f);
+		}
+		if (m != NULL) {
+			sweet_sb_orig_init = method_getImplementation(m);
+			if (!class_addMethod(sb, init, (IMP)sweet_sb_app_init, method_getTypeEncoding(m))) {
+				sweet_sb_orig_init = method_setImplementation(m, (IMP)sweet_sb_app_init);
+			}
+		}
+	}
 	Class c = objc_getClass("_UIStatusBarVisualProvider_Split1125");
 	if (c == Nil) {
 		return;                     /* no UIKit in this program */

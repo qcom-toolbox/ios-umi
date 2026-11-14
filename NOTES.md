@@ -2,6 +2,36 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: Dynamic Island experiment FAILED; recovery in progress.** User wants native island over umi's
+  upper-left camera and explicitly says **build locally on this computer**, not GitHub Actions.
+  - **Current phone files restored:** `/usr/local/lib/libsweet-island.dylib` removed;
+    `/usr/local/lib/libsweet-sb.dylib` restored to original 70240-byte backup and byte-compared.
+    Backup `/Users/enzo/ios-umi-backup/island-2026-11-14/libsweet-sb.dylib`.
+    User reports still stuck in respring after rollback. Asked to hold Power + Volume Down to Fastboot;
+    **next: boot existing `shim/out/umi-0301-sandbox-ext.img` (19513344 bytes)**, restore USB link and verify UI.
+    Do not reinstall the experiment until the original setup is recovered and the failure understood.
+  - First test hooked SBFEffectiveArtworkSubtype to 2556 (original 2436) and SBSEnableJindo to true (already
+    true originally), in SpringBoard only using installed Substrate. Geometry ObjC hooks: sensor 24x24 pt,
+    inert 28x28, center (133,58)/2.88, portrait expanded card clamped inside screen. Landscape uncalibrated.
+    Native SystemAperture code exists in 20H392; SpringBoard gates it on subtype 2556/2796 plus SBEnableJindo.
+  - Live log confirmed both function overrides, but **no island layout was observed**. SpringBoard aborts in
+    +[SpringBoardUI load]: missing `com.apple.springboard-ui.client` entitlement, assertion "This process
+    should not be linking or loading SpringBoardUI.framework". This persists even after removing the island
+    and restoring the original sb library, so early-load timing is only a hypothesis, NOT established cause.
+    UDP log shows `cs_invalid_page ... p=694[SpringBoard] ... allowing (remove VALID) page` before assertion.
+    Investigate signature/entitlement state across resprings if reboot fixes it.
+  - Tried deferring hooks inside the island library, then deferring dlopen to SpringBoard init, then
+    UIApplication init. Latter logged `UIApplication ... init ...` in constructor but never the init hook;
+    process aborts in +load before reaching it. Automatic skip marker cannot fix a failure outside the hooks.
+    Local sources are experimental only: `phone/sweet-island/sweet_island.m`, `phone/build-sweet-island.sh`,
+    optional loader in `phone/sweet-sb/sweet_sb_inject.c`. Both compile locally with -Wall -Wextra -Werror
+    and ldid; installed builds had identical readbacks. No kernel/image/partition changes.
+  - Logs: `/var/tmp/sweet-island.log`, `/var/tmp/sweet-island-loader.log`; host crash `/tmp/sweet-island-crash.ips`.
+    CrashReporter stopped producing reports at 210907 but UDP log showed continued crashes (do NOT infer
+    recovery from unchanged .ips list). Existing UDP receiver PID 36981 writes
+    `/private/tmp/claude-501/-Users-enzo-ios-sweet-port/3034b72e-0815-4d9a-a572-682517c59cf0/scratchpad/umi-0286-live.log`.
+    Kept original HEIC probe unchanged. Restart requests used sweet-kill.run + sweet-heic-probe.run.
+
 - **2026-11-14 21:30: Metal device limits filled (SweetMetal2 plugin; phone file changed, user OK'd; Photos opens -
   user-confirmed after reboot)** (diff `phone/metal2/frontend-device-limits.diff`, source `xnu-work/work/m2v-bridge-src`, build
   `out-limits/`).
