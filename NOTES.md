@@ -2,6 +2,24 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 16:10: WALLPAPER CHOICE SURVIVES REBOOTS; the "blue wallpaper back at every boot" did not reproduce
+  (user-verified, two reboots, no kernel or phone-file change).** The blue one is the iOS 16 WWDC 2022 poster
+  (`7400.WWDC_2022`, CollectionsPoster config `28C11B6B-...`), so it is not missing; user: the other stock wallpapers
+  are there too.
+  - Where the choice lives: `/private/var/mobile/Library/Application Support/PRBPosterExtensionDataStore/59/`
+    `SelectedConfigurationIdentifier.plist` (`{selectedConfigurationIdentifier: UUID}`, written by PosterBoard,
+    `-[PBFPosterExtensionDataStore _stateLock_persistSelectedConfigurationIdentifier:]` -> `prs_storeToPlist:error:`),
+    `SwitcherConfigurationOrdering.plist` (every saved poster, new ones appended; the iOS 16 one is index 0) and
+    `Extensions/<provider>/configurations/<UUID>/versions/N/` per poster. Before the test the store held 6 posters
+    (iOS 16 x2, 5070.Blue, 3 Gradient) with the iOS 16 one selected: earlier picks had been saved as posters.
+  - Test 1: user picked a Gradient -> file named it at once (`E4ED847D`), ~10 min later forced reboot into fastboot,
+    boot 0297: Gradient kept, file unchanged. Test 2: another pick (`7AD992AF`), forced reboot within ~10 s: kept.
+  - Ruled out: no `sweetlsreset` in recent images (0286-0297), nothing in `tools/sweet-root-tweaks.py` touches
+    wallpaper, migration plist stable (LastSystemVersion 20H392). The earlier resets were probably on older images
+    (the GPU / poster extension crash-loop period or the LS-reset boots); if it comes back, read
+    `SelectedConfigurationIdentifier.plist` before and after the boot and the ordering's index 0 (PosterBoard's
+    fallback when the selection is unusable).
+
 - **2026-11-14 15:35: STATUS BAR, DOCK, CORNERS, CAMERA HOLE AND KEYBOARD FIXED (user-verified)** (patches
   `xnu/patches/0296-umi-display-scaler-fit.patch` + `0297-umi-exec-statusbar-lib.patch`, image
   **`shim/out/umi-0297-statusbar.img`** = 0295 boot-args + 0296 + 0297; phone file `/usr/local/lib/libsweet-sb.dylib`
