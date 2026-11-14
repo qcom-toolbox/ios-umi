@@ -26,6 +26,8 @@ extern OSStatus VTApplyRestrictions(uint32_t flags);
 #include <fts.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/ioccom.h>
+#include <errno.h>
 #include <mach/mach.h>
 extern mach_port_t bootstrap_port;
 extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *name, mach_port_t *sp);
@@ -403,10 +405,49 @@ kill_run(void)
 	free(kp);
 }
 
+/*
+ * /var/tmp/sweet-grow.run holds a size in GiB: grow the root HFS+ volume online to that size
+ * (fsctl HFSIOC_RESIZE_VOLUME -> hfs_extendfs; journaled HFS+, root only; the userdata partition is ~107 GiB).
+ */
+#define SWEET_HFSIOC_RESIZE_VOLUME _IOW('h', 2, u_int64_t)
+extern int fsctl(const char *path, unsigned long request, void *data, unsigned int options);
+static void
+grow_run(void)
+{
+	FILE *f = fopen("/var/tmp/sweet-grow.run", "r");
+	unsigned gib = 0;
+	if (f != NULL) {
+		if (fscanf(f, "%u", &gib) != 1)
+			gib = 0;
+		fclose(f);
+	}
+	unlink("/var/tmp/sweet-grow.run");
+	struct statfs sf;
+	if (statfs("/", &sf) == 0)
+		fprintf(stderr, "before: %llu MB free of %llu MB (block %u)\n", (unsigned long long)sf.f_bavail * sf.f_bsize >> 20,
+		    (unsigned long long)sf.f_blocks * sf.f_bsize >> 20, (unsigned)sf.f_bsize);
+	if (gib < 17 || gib > 100) {
+		fprintf(stderr, "size %u GiB refused (17..100)\n", gib);
+		return;
+	}
+	u_int64_t size = (u_int64_t)gib << 30;
+	sync();
+	int r = fsctl("/", SWEET_HFSIOC_RESIZE_VOLUME, &size, 0);
+	fprintf(stderr, "fsctl HFSIOC_RESIZE_VOLUME %u GiB -> %d (errno %d %s)\n", gib, r, r ? errno : 0, r ? strerror(errno) : "");
+	sync();
+	if (statfs("/", &sf) == 0)
+		fprintf(stderr, "after: %llu MB free of %llu MB\n", (unsigned long long)sf.f_bavail * sf.f_bsize >> 20,
+		    (unsigned long long)sf.f_blocks * sf.f_bsize >> 20);
+}
+
 int
 main(int argc, char **argv)
 {
 	setvbuf(stderr, NULL, _IONBF, 0);
+	if (access("/var/tmp/sweet-grow.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
+		grow_run();
+		return 0;
+	}
 	if (access("/var/tmp/sweet-oslog.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
 		/* stream the unified log for 2 min for the programs named in the file, via sweet-oslog-dump */
 		char line[256] = "", *args[16] = { "/usr/local/bin/sweet-oslog-dump", "120" };

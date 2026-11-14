@@ -18,6 +18,13 @@
     previous (d21e0263...) as `SweetMetal2.sweet-pre-limits` next to it and in `~/ios-umi-backup/gpu-2026-11-14/`.
     Loads at the next reboot.
 
+- **2026-11-14 21:00: root volume grown online from 16 to 32 GiB (no reflash, no backup - user's choice)**: the probe
+  (`/var/tmp/sweet-grow.run` = size in GiB, 17..100) calls `fsctl("/", HFSIOC_RESIZE_VOLUME = _IOW('h', 2, u64))`
+  -> hfs_extendfs on the mounted journaled HFS+ root; the UFS driver answers DKIOCGETBLOCKCOUNT with the whole
+  userdata partition (~107 GiB). Result: `-> 0`, 441 MB free of 16384 MB -> 16808 MB free of 32768 MB; no hfs messages
+  in the kernel log; 3 MB write + read back identical. To check after the next reboot: still 32768 MB. More is possible
+  (up to the partition, ~107 GiB) the same way.
+
 - **2026-11-14 20:40: Photos: disk full, TCC sandbox extensions (0301), then Metal device limits (open)** (patch
   `xnu/patches/0301-umi-sandbox-extensions.patch`, kernel d0b98ef, image **`shim/out/umi-0301-sandbox-ext.img`** =
   0300 + 0301, same boot line).

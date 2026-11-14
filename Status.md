@@ -14,7 +14,7 @@
 | 🥾 Boot | Stock bootloader → `fastboot boot` of our shim → XNU | ✅ |
 | 🧠 CPU | All 8 cores; clocks follow the load (EPSS governor, 75 °C limit) | ✅ |
 | 🧮 RAM | 6 GB of the 8 GB for iOS (0x100000000-0x280000000). 6.66 GB (from 0xd6000000) booted but the persistent log stopped writing, so it is off for now | ✅ |
-| 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write | ✅ |
+| 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write; the root volume was grown online from 16 to 32 GiB (2026-11-14) | ✅ |
 | 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
 | 📱 Status bar / camera hole | Clock moved right of the front camera hole, right icons and Control Center carrier in place (`libsweet-sb`, kernel 0297) | ✅ |
 | 📷 Photos | Library is created since kernel 0301 (TCC sandbox extensions); it closed at start because the Metal device reported 0 texture size limits; SweetMetal2 fills them since 2026-11-14: Photos opens | ✅ |
