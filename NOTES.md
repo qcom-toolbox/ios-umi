@@ -15,7 +15,8 @@
   - Stopgap (user OK'd, user: "a workaround, not a fix"): in
     `/Library/Wallpaper/Collections/iOS_16~iphone.wallpaperCollection/Wallpapers/7400.WWDC_2022-375w-812h@3x~iphone.wallpaper/`
     the three `main.caml` point at PNG copies (`sips` on the Mac) `Head.png HeadMask.png Leg.png Arm.png Body.png`
-    next to the HEICs; originals kept as `main.caml.sweet-orig`. Not yet seen on screen; posters already added keep
+    next to the HEICs; originals kept as `main.caml.sweet-orig`. **User (boot 0298): "wallpaper shows all right"** - so
+    the missing layers were only the HEIC decode. Posters already added keep
     their own HEIC copies under `PRBPosterExtensionDataStore/59/.../configurations/<UUID>/versions/N/contents`.
   - **File server bugs found and fixed (0298):** (1) request lines were split at spaces, so a PUT to
     ".../Application Support/..." wrote a file `/private/var/mobile/Library/Application` (removed). Paths now travel

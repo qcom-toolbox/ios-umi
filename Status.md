@@ -17,7 +17,7 @@
 | 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write | ✅ |
 | 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
 | 📱 Status bar / camera hole | Clock moved right of the front camera hole, right icons and Control Center carrier in place (`libsweet-sb`, kernel 0297) | ✅ |
-| 🖼️ Wallpaper | Stock wallpapers and posters listed, the choice stays after a reboot; but no HEIC image decodes (no Apple HEVC decoder), so image wallpapers such as iOS 16 WWDC 2022 show only their gradient (PNG stopgap for iOS 16 being tested) | ⚠️ |
+| 🖼️ Wallpaper | Stock wallpapers and posters listed, the choice stays after a reboot; but no HEIC image decodes (no Apple HEVC decoder), so image wallpapers such as iOS 16 WWDC 2022 show only their gradient (iOS 16 WWDC 2022 shows correctly with PNG copies of its layers: a stopgap) | ⚠️ |
 | ⌨️ Keyboard | Keys kept 12 pt off the curved sides (`libsweet-sb`); emoji / dictation layouts and landscape not checked | ⚠️ |
 | 🔆 Brightness | Slider, Control Center, auto-brightness, Night Shift | ✅ |
 | 👆 Touch | ST FTM5 | ✅ |
