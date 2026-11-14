@@ -4,6 +4,17 @@
 
 - **2026-11-14: Dynamic Island experiment FAILED; recovery in progress.** User wants native island over umi's
   upper-left camera and explicitly says **build locally on this computer**, not GitHub Actions.
+  - **Recovery boot completed:** user entered Fastboot; `fastboot boot shim/out/umi-0301-sandbox-ext.img`
+    sent 19056 KB OK (0.747 s), boot OK (0.149 s), total 0.913 s. USB en8 / file service returned;
+    original libsweet-sb verified byte-identical again after reboot, island library absent. UDP shows
+    SpringBoard[26] running (180%, then 22% CPU) without the earlier entitlement abort. Await user's screen
+    confirmation. Experimental code checkpoint commit `b847682`; do not claim island works.
+  - **Likely installation mistake, not yet proven:** tests PUT updated signed dylibs over existing vnodes;
+    fresh bytes read back correctly, but XNU may retain the previous vnode's code-signing hashes. This fits
+    cs_invalid_page followed by entitlement loss and survival across resprings. Existing build-sweet-sb.sh
+    install uses RM then PUT, which the manual test installation omitted. For any future signed binary
+    replacement, preserve a backup then unlink + create a new file (or atomic rename where supported),
+    rather than overwrite an existing mapped/signed vnode. Reboot clears runtime signature caches.
   - **Current phone files restored:** `/usr/local/lib/libsweet-island.dylib` removed;
     `/usr/local/lib/libsweet-sb.dylib` restored to original 70240-byte backup and byte-compared.
     Backup `/Users/enzo/ios-umi-backup/island-2026-11-14/libsweet-sb.dylib`.
