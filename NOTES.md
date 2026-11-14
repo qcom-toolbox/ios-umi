@@ -2,6 +2,27 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 13:40: Wi-Fi 0291 boot: wifid never tries the saved network at boot; a tap joins it with the saved
+  key; lead: the clock is 1970 at boot** (0292: patch `xnu/patches/0292-umi-wlan-wall-clock-log.patch`, image
+  **`shim/out/umi-0292-wifi-clock.img`**, built, not booted).
+  - 0291 boot, live log from ~2 min: en0 up, wifid's known-network scans right away (3 channels incl. 5200 MHz, then
+    1, 34, 38...), 24 scans, 315 scan results read - and **no ASSOCIATE at all** until the user tapped the network:
+    `join 1 at 295 s after boot: key from wifid (PMK) -> 0`, keys in, block ack accepted. User: "it connected".
+    So the password is stored and correct; wifid's auto-join decides not to join at boot.
+  - wifid's records (`/private/var/preferences/com.apple.wifi.known-networks.plist`, `SystemConfiguration/
+    com.apple.wifi.plist`, `com.apple.wifi-private-mac-networks.plist`; read with umi-files.py get into the
+    scratchpad, not in git: network names and router addresses): **many dates are 1970-01-01** (networks added /
+    joined / private MAC made while the clock was 1970); the network of today has 2026-11-14 dates. The phone has
+    no RTC driver: it boots in 1970 until LTE's NITZ / NTP sets the date. A known network "added" or "joined" in
+    the future, or a private MAC "made" in the future, is a likely reason for wifid to skip it (not proven).
+    Each network also has a private MAC record (iOS joins with a per-network random MAC); our driver always uses
+    the one MAC from the ADT - wifid does not seem to mind (manual joins work).
+  - 0292 logs `SWEET WLSTA: the wall clock when en0 came / at this join / was SET: day N since 1970 (...), HH:MM UTC,
+    T s after boot`. If the boot shows "1970s: never set" and auto-join follows "was SET" (or never comes), next
+    step is an RTC: PM8150 RTC (SPMI sid 0, read 0x6048..0x604b, rtc-pm8xxx) counts seconds across reboots but is
+    not the real date (Android keeps an offset in /data); keep that offset in a small file written by the kernel
+    once the date is set, and set the calendar from RTC + offset before wifid starts.
+
 - **2026-11-14: Wi-Fi 0290: for "after a reboot the saved network is tried, fails, and the password must be typed
   again"** (patch `xnu/patches/0290-umi-wlan-sync-after-join-eauth.patch`, kernel = 0289 + this; image
   **`shim/out/umi-0290-wifi-reboot.img`** = 0286's line; built, not booted).

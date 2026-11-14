@@ -1,0 +1,73 @@
+From d1c69724e8165d86c9bbf7c3f9a5b1050568eb06 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 13:40:51 +0100
+Subject: [PATCH] umi: wlan (0292): the wall clock logged when en0 comes, at
+ each join, and when it jumps (the phone boots in 1970 until NITZ / NTP sets
+ it)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_wlsta.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/bsd/dev/sweet_wlsta.c b/bsd/dev/sweet_wlsta.c
+index 977148a..c8e95e4 100644
+--- a/bsd/dev/sweet_wlsta.c
++++ b/bsd/dev/sweet_wlsta.c
+@@ -192,11 +192,37 @@ struct sync_args;
+ extern int sync(proc_t p, struct sync_args *uap, int32_t *retval);
+ static int sta_sync_soon;
+ 
++/*
++ * 0292: the wall clock, said when en0 comes and whenever it jumps. This phone has no clock driver: it
++ * boots in 1970 until somebody (LTE's NITZ, NTP) sets the date - and wifid keeps dates in its known
++ * networks (added, joined, private MAC made), which may then all lie in the future.
++ */
++static int64_t sta_clock_last_s, sta_clock_up_s;
++
++static void
++sta_clock_check(const char *when)
++{
++	clock_sec_t sec;
++	clock_usec_t usec;
++	clock_get_calendar_microtime(&sec, &usec);
++	int64_t up = (int64_t)(sta_now_ms() / 1000), wall = (int64_t)sec;
++	int64_t drift = (wall - sta_clock_last_s) - (up - sta_clock_up_s);
++	if (when != NULL || drift > 60 || drift < -60) {
++		/* days since 1970 and the time of day in UTC: no calendar code needed */
++		printf("SWEET WLSTA: the wall clock %s: day %lld since 1970 (%s), %02lld:%02lld UTC, %lld s after boot\n",
++		    when != NULL ? when : "was SET", wall / 86400, wall < 20000 * 86400LL ? "1970s: never set" : "set",
++		    wall % 86400 / 3600, wall % 3600 / 60, up);
++	}
++	sta_clock_last_s = wall;
++	sta_clock_up_s = up;
++}
++
+ static void
+ sta_sync_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+ 	for (unsigned n = 0;; n++) {
+ 		int32_t rv = 0;
++		sta_clock_check(NULL);
+ 		assert_wait_timeout((event_t)&sta_sync_soon, THREAD_UNINT, sta_sync_soon ? 8000 : 30000, NSEC_PER_MSEC);
+ 		sta_sync_soon = 0;
+ 		(void)thread_block(THREAD_CONTINUE_NULL);
+@@ -241,6 +267,7 @@ sta_join(const struct redwood_sta_join *what)
+ 	sta_hist[sta_hist_n % 12].result = (int16_t)r;
+ 	sta_hist_n++;
+ 	sta_hist_say();
++	sta_clock_check("at this join");
+ 	if (r == 0) {
+ 		sta_sync_soon = 1;
+ 		thread_wakeup((event_t)&sta_sync_soon);
+@@ -444,6 +471,7 @@ sweet_wlsta_start(void)
+ 	}
+ 	redwood_sta_attach(&sta_ops);
+ 	printf("SWEET WLSTA: en0 and the station are up for wifid\n");
++	sta_clock_check("when en0 came");
+ 	uint32_t syncs = 1;
+ 	thread_t st;
+ 	(void)PE_parse_boot_argn("sweetsync", &syncs, sizeof(syncs));
+-- 
+2.54.0 (Apple Git-157)
+
