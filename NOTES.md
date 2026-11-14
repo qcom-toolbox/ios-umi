@@ -2,6 +2,18 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **🎉 2026-11-14 11:20: Wi-Fi 0285/0286 first boot (`shim/out/umi-0286-wlan.img`): 5 GHz joined, 270 Mbit/s on fast.com (user)**
+  - **Before (kernel 0284, 2026-11-14, user):** "internet is too goddamn slow on device to run a speedtest" - the speed
+    test page could not even run (ADDBA declined, 16 transmit buffers reused blindly, 2 ms poll).
+  - **After (kernel 0286 = dc8c28a, same boot line as 0284's):** user: "it saw a 5 ghz network all good even got
+    270 mb/s on fast.com". fast.com's figure is the download rate. No panic reported.
+  - Not captured: the kernel log of this boot stops ~90 s in (the USB Ethernet gadget dropped before Wi-Fi came up,
+    the known mid-boot stop), so the join line (width, phymode), the ADDBA lines, the REO command status and the
+    `net: ... throughput:` meter line of this run are missing. Next boot: `sudo tools/umi-usbnet.sh` again once the
+    phone is up, then one more speed test, and read those lines.
+  - Still to test on the phone: upload rate, link drop -> rejoin (AP off for 30 s and back), reconnect after reboot and
+    sleep, hidden network, Forget + rejoin in Settings, a 2.4 GHz network, roaming between two saved networks.
+
 - **2026-11-12 22:35: Wi-Fi 0285/0286: 5 GHz, HT/VHT, Block Ack (REO window 256), adaptive polling, 128-BSS cache, hidden/targeted scans, auto-rejoin & roam**
   (patches `xnu/patches/0285-umi-wlan-5ghz-vht-ba-throughput.patch`, `xnu/patches/0286-umi-wlan-rejoin-roam-apple80211.patch`;
   kernel `dc8c28a`; image **`shim/out/umi-0286-wlan.img`** built, **not yet booted on device** — no phone connected in this session,

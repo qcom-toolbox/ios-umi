@@ -23,7 +23,7 @@
 | 🔌 Type-C Charge | Charger control (kernel 0252): 4.40 V, 2.0 A charge current (Android's value for this phone), input limit from the charger type (computer 500 mA, wall / other 1.5 A, Type-C 3 A), QC 2.0 / 3.0 at 9 V (untested). A USB-PD charger charges at ~+0.6 A; a computer port still can't keep up with iOS. No USB-PD, no 30 W charge pump | ⚠️ |
 | ⚡ Wireless charge | | ❌ |
 | 🔊 Audio | Speaker works (ringtones, system sounds); no microphones, earpiece not used | ⚠️ |
-| 🛜 WiFi | 2.4 GHz + 5 GHz, open + WPA2-PSK, HT/VHT rates, Block Ack (0285/0286 built, pending device measurement) | ⚠️ |
+| 🛜 WiFi | 2.4 GHz + 5 GHz, open + WPA2-PSK, HT/VHT rates, Block Ack; **270 Mbit/s down on fast.com at 5 GHz** (kernel 0286; 0284 was too slow to run a speed test). Rejoin after a lost link, hidden networks and sleep / reboot reconnect still to test; no WPA3 | ⚠️ |
 | 🦷 Bluetooth | QCA6390 over UART (921600 baud): scan, connect and pair in Settings, Control Center button, off / on (slow); see the tests below | ⚠️ |
 | 📶 Cellular Data | Snapdragon X55 brought up by the kernel (`sweetmdm=10 sweetmdmonline=1`): SIM, LTE registration on Sunrise, a new network search after 3 min without service; status bar shows **Sunrise, signal bars and LTE**; **mobile data works** (Safari over LTE with Wi-Fi off) through the kernel's `pdp_ip0` and `sweet-telephonyd` (the CommCenter stand-in, publishes the service to configd); the session survives a short loss of signal; **Control Center's cellular data button works**. IPv4 only (Sunrise has no IPv6). Not done: Settings > Cellular is incomplete (PIN, SIM lock, carrier settings, data usage, manual network selection); the switch stopping data in the kernel (0280) is untested; calls and SMS not planned | ✅ |
 | 📍 Location | Works through Wi-Fi positioning (Weather shows the city, Maps asks for permission) | ✅ |
@@ -136,5 +136,5 @@
 * **RAM**: ~7 GB by moving our DSP / Wi-Fi buffers into free low RAM (0x92700000-0xb03fffff) and starting iOS at 0xc0000000
 * **Charging**: why a 3 A USB-PD charger only gives ~+0.6 A (AICL?); QC 3.0 test with a QC charger; USB-PD and the SMB1390 charge pump for 30 W
 * **Audio**: check that the speaker still plays with the plug-in's hardware volume control removed (installed, not yet loaded)
-* **Wi-Fi**: boot and measure 0285/0286 throughput (Mbit/s), roaming, hidden networks, and sleep/wake; WPA3-SAE (needs P-256 ECC + PMF)
+* **Wi-Fi**: test on 0286: upload rate, rejoin after a lost link, reconnect after reboot / sleep, hidden networks, Forget + rejoin, roaming; WPA3-SAE (needs P-256 ECC + PMF)
 * **GPS**, **Fingerprint**, **Face ID / SEP**, **NFC**, **Wireless charging**
