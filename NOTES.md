@@ -2,6 +2,22 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 21:30: Metal device limits filled (SweetMetal2 plugin; phone file changed, user OK'd; not yet checked
+  in Photos)** (diff `phone/metal2/frontend-device-limits.diff`, source `xnu-work/work/m2v-bridge-src`, build
+  `out-limits/`).
+  - `_MTLDevice` (Metal 20H392) holds an ivar `_limits` (64 x u32 incl. two floats, then u64 maxBufferLength:
+    maxFramebufferStorageBits ... maxTextureWidth2D, maxTextureHeight2D ... maxConstantBufferArguments,
+    maxBufferLength) that `-limits` returns. `initLimits` (empty in the bridge, it would fill an Apple GPU profile)
+    is the only writer, so every field was 0 and Photos fitted each image into 0x0.
+  - New `fillLimits()` runs when the device opens: field names come from the ivar's type encoding; each field gets
+    the bridge's own answer to the selector of the same name (installAnswers' measured counts, e.g. maxTextureWidth2D
+    16384, or an NBDeviceMethods getter such as maxBufferLength / maxComputeThreadgroupMemory); unanswered fields
+    stay 0. Logs `native-metal: _limits N of M fields filled (... bytes): maxTexture2D WxH, maxColorAttachments C`.
+    Env `SWEET_MTL2_NO_LIMITS` = old behaviour.
+  - Phone: `/System/Library/Extensions/SweetMetal2.bundle/SweetMetal2` = new build (read back, sha256 c4c5d075...);
+    previous (d21e0263...) as `SweetMetal2.sweet-pre-limits` next to it and in `~/ios-umi-backup/gpu-2026-11-14/`.
+    Loads at the next reboot.
+
 - **2026-11-14 20:40: Photos: disk full, TCC sandbox extensions (0301), then Metal device limits (open)** (patch
   `xnu/patches/0301-umi-sandbox-extensions.patch`, kernel d0b98ef, image **`shim/out/umi-0301-sandbox-ext.img`** =
   0300 + 0301, same boot line).

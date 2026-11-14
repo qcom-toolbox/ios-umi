@@ -1,0 +1,70 @@
+--- /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm.pre-limits	2026-11-14 20:36:28
++++ /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm	2026-11-14 20:36:33
+@@ -10,6 +10,7 @@
+ #import <Metal/Metal.h>
+ #import <IOSurface/IOSurfaceRef.h>
+ #import <objc/runtime.h>
++#import <objc/message.h>
+ #include <algorithm>
+ #include <atomic>
+ #include <initializer_list>
+@@ -2526,6 +2527,51 @@
+  }
+ }
+ 
++// SweetMetal2: _MTLDevice keeps a `_limits` struct (maxTextureWidth2D, maxColorAttachments, ... maxBufferLength) that its `limits` SPI
++// returns and Metal and its clients read directly. initLimits fills it from an Apple GPU profile and is empty here, so every field stayed 0:
++// Photos fits each image into limits->maxTextureWidth2D x maxTextureHeight2D and aborted on a 0x0 context (PXGMetalTextureConverter,
++// "!PXPixelSizeAreaIsZero(roundedSize)"). The struct's field names are in the ivar's type encoding; each field gets this device's own
++// answer to the selector of the same name (installAnswers, or a method of NBDeviceMethods), and a field nothing answers stays 0.
++static void fillLimits(id device) {
++ Ivar ivar=class_getInstanceVariable(object_getClass(device),"_limits");
++ const char *type=ivar?ivar_getTypeEncoding(ivar):nullptr;
++ if(!type||*type!='{'){NBLOG(@"native-metal: no _limits ivar");return;}
++ const char *p=strchr(type,'=');if(!p){NBLOG(@"native-metal: _limits encoding %s",type);return;}
++ p++;
++ uint8_t *base=(uint8_t *)(__bridge void *)device+ivar_getOffset(ivar);
++ size_t offset=0;unsigned filled=0,fields=0;
++ while(*p=='"') {
++  const char *end=strchr(p+1,'"');if(!end)break;
++  std::string name(p+1,end-p-1);char code=end[1];p=end+2;
++  size_t size=code=='Q'||code=='q'?8:code=='I'||code=='i'||code=='f'?4:0;
++  if(!size){NBLOG(@"native-metal: _limits field %s type %c not handled",name.c_str(),code);return;}
++  offset=(offset+size-1)&~(size-1);fields++;
++  SEL sel=sel_registerName(name.c_str());uint64_t value=0;bool have=false;
++  auto answer=gAnswers.find(sel);
++  if(answer!=gAnswers.end()){value=answer->second;have=true;}
++  else if(Method m=class_getInstanceMethod([NBDeviceMethods class],sel)) {
++   char ret[8]={};method_getReturnType(m,ret,sizeof ret);
++   if(method_getNumberOfArguments(m)==2&&(ret[0]=='Q'||ret[0]=='I')){value=((uint64_t(*)(id,SEL))objc_msgSend)(device,sel);have=true;}
++  }
++  if(have&&value) {
++   if(code=='f'){float f=(float)value;memcpy(base+offset,&f,4);}
++   else if(size==4){uint32_t v=(uint32_t)std::min<uint64_t>(value,UINT32_MAX);memcpy(base+offset,&v,4);}
++   else memcpy(base+offset,&value,8);
++   filled++;
++  }
++  offset+=size;
++ }
++ uint32_t w=0,h=0,c=0;
++ auto at=[&](const char *field,uint32_t *out){
++  // Re-walk for the few fields worth a log line.
++  const char *q=strchr(type,'=')+1;size_t o=0;
++  while(*q=='"'){const char *e=strchr(q+1,'"');std::string n(q+1,e-q-1);char k=e[1];q=e+2;size_t z=k=='Q'||k=='q'?8:4;o=(o+z-1)&~(z-1);
++   if(n==field&&z==4){memcpy(out,base+o,4);return;}o+=z;}
++ };
++ at("maxTextureWidth2D",&w);at("maxTextureHeight2D",&h);at("maxColorAttachments",&c);
++ NBLOG(@"native-metal: _limits %u of %u fields filled (%zu bytes): maxTexture2D %ux%u, maxColorAttachments %u",filled,fields,offset,w,h,c);
++}
++
+ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
+  if(gDeviceObject)return gDeviceObject;
+  gMissing=missing;gInFlight=[NSMutableSet set];
+@@ -2591,6 +2637,7 @@
+   NBLOG(@"native-metal: MTLTextureImplementation %s",tp?([NBTexture conformsToProtocol:tp]?"adopted":"not adopted"):"missing");}
+  objc_registerClassPair(cls);
+  gDeviceObject=[cls new];
++ if(!getenv("SWEET_MTL2_NO_LIMITS"))fillLimits(gDeviceObject);
+  return gDeviceObject;
+ }
+ 
