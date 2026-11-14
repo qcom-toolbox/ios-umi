@@ -26,6 +26,16 @@
     0290 boot joining without the password typed (then the saved password was on the disk all along and the
     boot-time handshake verdict / retry was the cause) or a second boot the user started. The join history lines
     (`SWEET WLSTA: join N at T s after boot ...`) will tell once `umi-usbnet.sh` has been run on that boot.
+  - **Same boot, 12:03, from the log (after `umi-usbnet.sh`):**
+    - Throughput meter, a download (speed test) on 5 GHz: `net: qca6390 throughput: 11 s busy; in 167.6 Mbit/s mean
+      (best second 329.6), out 1.4 Mbit/s mean (best second 2.5); 225159 KB in`. Receive: 550275 11ac MPDUs, best
+      `11ac MCS 7, 2 streams, 80 MHz, short GI`; 0 dropped, REO exception / release rings untouched; 478134 of
+      478134 transmits acked. (0284: no speed test would run.) Upload not measured yet.
+    - Join history: `join 1 at 326 s after boot: key from wifid (PMK) -> 0`, `join 2 at 388 s: PMK -> 80`,
+      `join 3 at 429 s: PMK -> 0`. So the first join of the boot came with the saved key and worked; 62 s later a
+      join was turned down by the AP (EAUTH under 0290's stricter rule: message 1 repeated or a deauth), and 41 s
+      after that one worked. What the user did between them is not known yet (another saved network? password
+      typed again?), and the first join only came 326 s after boot (en0 is up at ~100 s).
 
 - **2026-11-14 11:45: Wi-Fi on 0289, first log of a join: VHT80, 2 streams, block ack accepted; auto-join works after
   the Wi-Fi switch, not after a reboot (open)**
