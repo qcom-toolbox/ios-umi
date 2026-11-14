@@ -2,6 +2,21 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14: timer hooks rolled back; native countdown activity creation confirmed.**
+  - objc_addLoadImageFunc callback caused Clock to crash before launch: `__os_unfair_lock_recursive_abort`
+    (0x1d1b08f18) -> libobjc -> adapter callback -> objc_addLoadImageFunc. Runtime lock is not reentrant for
+    class queries here. Removed ALL timer hooks, rebuilt and installed sb via RM/PUT/readback (70416 bytes).
+    User confirms Clock opens again. Keep this rollback; original supportsSessions already returned true.
+  - Unified log proves mobiletimerd creates TimerActivityAttributes through ActivityKit; liveactivitiesd creates
+    activity with destinations [lockscreen, systemAperture, banner], renderer target com.apple.ClockAngel.
+    ClockAngel[640] starts and runs without a kernel crash. Still no visible timer in island (user).
+    Latest trace `/tmp/sweet-island-countdown.log`; new 120-s trace names ClockAngel, SpringBoard, liveactivitiesd
+    starts at 20:38:14 UTC, `/var/tmp/sweet-heic-probe.log` -> `/tmp/sweet-island-display.log`.
+    User asked to open a fresh app then start countdown and leave it running to capture display-side failure.
+  - Actual Clock app `/private/var/containers/Bundle/Application/FE7BEC31-3767-44DC-9078-6B6AF2A1A414/MobileTimer.app`,
+    only WorldClockWidget.appex, no activity entitlement needed in app: mobiletimerd creates activities;
+    ClockAngel in /Applications renders them. Do not spoof all apps or change MobileGestalt globally.
+
 - **2026-11-14: native Dynamic Island now loads; lock-screen UI works, app activities still open.**
   - Recovery from the earlier failed trial succeeded: original lib restored + 0301 Fastboot boot, user confirmed Home.
     Correct **RM then PUT** signed-library installation fixes the respring failures: loader-only restart ran normally,
