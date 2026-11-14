@@ -1,0 +1,82 @@
+From d0b98ef3f7557a5baeec3a5d05a161004f8e64af Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 20:28:26 +0100
+Subject: [PATCH] umi: Sandbox stand-in (0301): extension issue returns a token
+ ('sweet;CLASS') and consume a handle - tccd attaches one to every grant, and
+ its failure made TCC refuse Photos access (assetsd / Photos: 'not allowed to
+ access Photo data')
+
+---
+ bsd/kern/sweet_amfi.c | 36 ++++++++++++++++++++++++++++++++----
+ 1 file changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 4494abd..f504a1c 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -25,6 +25,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <kern/debug.h>
+ #include <kern/startup.h>
++#include <machine/atomic.h>
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+ #include <sys/codesign.h>
+@@ -281,13 +282,13 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+  * (backboardd cannot reach mobilegestalt or iohideventsystem; tccd:
+  * "profile not found"). SWEET runs without a sandbox: operations succeed
+  * (checks allow, profile init is accepted); the few that must return
+- * data (container paths, extension tokens) fail with ENOENT. The first
++ * data fail with ENOENT (container paths) or are made up (extension tokens, 0301). The first
+  * use of each operation number is logged.
+  */
+ static uint64_t sweet_sandbox_seen;
+ 
+ static int
+-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
++sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
+ 		sweet_sandbox_seen |= 1ULL << call;
+@@ -296,9 +297,36 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 		printf("SWEET Sandbox: %s op %d\n", name, call);
+ 	}
+ 	switch (call) {
++	case 5: {       /* extension issue */
++		/*
++		 * (0301) libsystem_sandbox __sandbox_extension_issue: arg -> 7 x u64 {class string, type, path/data,
++		 * flags, token buffer (malloc 0x800), pid, ...}. tccd issues one with every grant ("Failed to issue
++		 * sandbox extension for class: com.apple.tcc.kTCCServicePhotos" -> TCC error 6 -> Photos / assetsd
++		 * "not allowed to access Photo data"). Nothing is sandboxed here, so the token only has to exist:
++		 * "sweet;CLASS".
++		 */
++		uint64_t a[7];
++		char cls[128] = "", token[192];
++		size_t done = 0;
++		if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0 || a[4] == 0) {
++			return EINVAL;
++		}
++		if (a[0] != 0) {
++			(void)copyinstr((user_addr_t)a[0], cls, sizeof(cls), &done);
++		}
++		snprintf(token, sizeof(token), "sweet;%s", cls);
++		return copyout(token, (user_addr_t)a[4], strlen(token) + 1);
++	}
++	case 6: {       /* extension consume: arg -> {token, strlen + 1, &handle (i64)} */
++		static int64_t sweet_sandbox_handle;
++		uint64_t a[3];
++		if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0 || a[2] == 0) {
++			return EINVAL;
++		}
++		int64_t h = os_atomic_inc(&sweet_sandbox_handle, relaxed);
++		return copyout(&h, (user_addr_t)a[2], sizeof(h));
++	}
+ 	case 4:         /* container path (audit token / pid) */
+-	case 5:         /* extension issue */
+-	case 6:         /* extension consume */
+ 	case 0x43:      /* container expected */
+ 		return ENOENT;
+ 	default:
+-- 
+2.54.0 (Apple Git-157)
+

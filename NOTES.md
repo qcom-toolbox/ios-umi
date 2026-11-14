@@ -2,6 +2,32 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 20:40: Photos: disk full, TCC sandbox extensions (0301), then Metal device limits (open)** (patch
+  `xnu/patches/0301-umi-sandbox-extensions.patch`, kernel d0b98ef, image **`shim/out/umi-0301-sandbox-ext.img`** =
+  0300 + 0301, same boot line).
+  - Root volume was full (`/`: 0 MB free of 16384 MB; Photos' Metal shader cache "No space left on device"). 67 old
+    unified logs deleted (user OK'd) -> 491 MB free. /private/var/db/diagnostics 829 MB, uuidtext 486 MB,
+    DuetExpertCenter 252, /var/root/Library 248, Caches 192. The volume is a 16 GiB image in the ~107 GiB userdata
+    partition: growing it online (fsctl HFSIOC_RESIZE_VOLUME -> hfs_extendfs) is the lasting fix (not done; needs
+    DKIOCGETBLOCKCOUNT from the UFS driver checked, and a backup first).
+  - **System log readable now:** `phone/heic-trace/sweet_oslog_dump.m` (LoggingSupport's private live stream,
+    ad-hoc signed with com.apple.private.logging.{stream,admin,diagnostic}, user OK'd), run in the background by the
+    probe when `/var/tmp/sweet-oslog.run` holds process names (2 min; output lands in /var/tmp/sweet-heic-probe.log).
+  - **TCC:** tccd granted kTCCServicePhotos (entitlement found) but "Failed to issue sandbox extension for class:
+    com.apple.tcc.kTCCServicePhotos" -> TCC error 6 -> assetsd "requires TCCPhotosService access", Photos "not allowed
+    to access Photo data", no Photos.sqlite ever created. Our "Sandbox" stand-in answered op 5 (extension issue) and
+    op 6 (consume) with ENOENT. **0301**: op 5 copies out a token "sweet;CLASS" into the caller's buffer (args: 7 x u64
+    {class, type, path, flags, token buffer 0x800, pid, ...}), op 6 writes a handle (args {token, len, &handle}).
+    On 0301 the library exists (PhotoData/Photos.sqlite etc.).
+  - **Next (open, GPU side):** Photos now aborts `!PXPixelSizeAreaIsZero(roundedSize)` in
+    `_PXGCreateContext <- PXGMetalCompatibleImageByRedrawingCGImage <- -[PXGMetalTextureConverter
+    createTextureFromCGImage:...] <- _createTransparentTexture <- -[PXGMetalRenderer _setupMetalIfNeeded]`: the
+    fitting size comes from `[[metalRenderContext device] limits]` (two integers -> d8/d9), most likely 0 from the
+    metal2vulkan MTLDevice (SweetMetal2). Fill the device limits struct (max 2D texture width/height 16384 on A11).
+  - Exception / os_log logger `phone/heic-trace/sweet_exc_log.c` (libsweet-exc, objc exception preprocessor +
+    own-image os_log capture) and probe modes: `/var/tmp/sweet-inject.run` "LIB NAME..." (runtime kern.exec_inject +
+    restart), `sweet-kill.run`, `sweet-du.run` (free space + big directories).
+
 - **2026-11-14 20:10: HEIC DECODES (kernel 0300, probe-verified)** (patches `xnu/patches/0299-umi-iosurface-limits.patch`,
   `0300-umi-iosurface-plane-bpr.patch`, kernel f1ff0c6 + 7b9dbfe, image **`shim/out/umi-0300-surface-planes.img`** =
   0298's boot line exactly + 0299 + 0300).

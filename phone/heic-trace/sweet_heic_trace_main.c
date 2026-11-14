@@ -23,6 +23,9 @@
 extern char **environ;
 extern OSStatus VTApplyRestrictions(uint32_t flags);
 #include <dlfcn.h>
+#include <fts.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
 #include <mach/mach.h>
 extern mach_port_t bootstrap_port;
 extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *name, mach_port_t *sp);
@@ -281,10 +284,165 @@ ms_test(void)
 	fprintf(stderr, "kern.exec_inject restored -> %d\n", r);
 }
 
+/* /var/tmp/sweet-inject.run holds "LIBRARY NAME [NAME...]": add that group to kern.exec_inject (until the next boot)
+ * and kill the named programs so launchd starts them again with the library. */
+static void
+inject_run(void)
+{
+	FILE *f = fopen("/var/tmp/sweet-inject.run", "r");
+	char line[400] = "";
+	if (f == NULL)
+		return;
+	if (fgets(line, sizeof(line), f) == NULL)
+		line[0] = 0;
+	fclose(f);
+	unlink("/var/tmp/sweet-inject.run");
+	line[strcspn(line, "\n")] = 0;
+	char old[512] = "", now[1000];
+	size_t len = sizeof(old);
+	sysctlbyname("kern.exec_inject", old, &len, NULL, 0);
+	snprintf(now, sizeof(now), "%s%s%s", old, old[0] ? ";" : "", line);
+	fprintf(stderr, "kern.exec_inject '%s' -> %d\n", now, sysctlbyname("kern.exec_inject", NULL, NULL, now, strlen(now) + 1));
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+	size_t sz = 0;
+	sysctl(mib, 3, NULL, &sz, NULL, 0);
+	struct kinfo_proc *kp = malloc(sz);
+	if (kp && sysctl(mib, 3, kp, &sz, NULL, 0) == 0) {
+		for (size_t i = 0; i < sz / sizeof(*kp); i++) {
+			const char *w = strchr(line, ' ');
+			while (w != NULL) {
+				w++;
+				size_t wl = strcspn(w, " ");
+				if (wl && strlen(kp[i].kp_proc.p_comm) == wl && strncmp(kp[i].kp_proc.p_comm, w, wl) == 0)
+					fprintf(stderr, "kill %s %d -> %d\n", kp[i].kp_proc.p_comm, kp[i].kp_proc.p_pid,
+					    kill(kp[i].kp_proc.p_pid, SIGKILL));
+				w = strchr(w, ' ');
+			}
+		}
+	}
+	free(kp);
+}
+
+/* /var/tmp/sweet-du.run: free space on / and the size of the biggest directories two levels under a few roots. */
+static unsigned long long
+dir_bytes(const char *path)
+{
+	char *const roots[] = { (char *)path, NULL };
+	unsigned long long total = 0;
+	FTS *fts = fts_open(roots, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL);
+	FTSENT *e;
+	while (fts != NULL && (e = fts_read(fts)) != NULL)
+		if (e->fts_info == FTS_F && e->fts_statp != NULL)
+			total += (unsigned long long)e->fts_statp->st_blocks * 512;
+	if (fts != NULL)
+		fts_close(fts);
+	return total;
+}
+
+static void
+du_run(void)
+{
+	unlink("/var/tmp/sweet-du.run");
+	struct statfs sf;
+	if (statfs("/", &sf) == 0)
+		fprintf(stderr, "/: %llu MB free of %llu MB\n", (unsigned long long)sf.f_bavail * sf.f_bsize >> 20,
+		    (unsigned long long)sf.f_blocks * sf.f_bsize >> 20);
+	static const char *roots[] = { "/private/var", "/private/var/mobile", "/private/var/mobile/Library",
+		"/private/var/mobile/Media", "/private/var/local", "/private/var/db", "/private/var/containers/Data/Application",
+		"/private/var/mobile/Containers/Data/Application", "/private/var/mobile/Library/Logs", "/private/var/tmp",
+		"/private/var/root", "/private/var/jb", "/usr/local", "/var/cache", "/private/var/log" };
+	for (unsigned r = 0; r < sizeof(roots) / sizeof(roots[0]); r++) {
+		char *const one[] = { (char *)roots[r], NULL };
+		FTS *fts = fts_open(one, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL);
+		FTSENT *e;
+		fprintf(stderr, "== %s\n", roots[r]);
+		while (fts != NULL && (e = fts_read(fts)) != NULL) {
+			if (e->fts_level == 1 && e->fts_info == FTS_D) {
+				unsigned long long b = dir_bytes(e->fts_path);
+				if (b >= (20ULL << 20))
+					fprintf(stderr, "%8llu MB %s\n", b >> 20, e->fts_path);
+				fts_set(fts, e, FTS_SKIP);
+			} else if (e->fts_level == 1 && e->fts_info == FTS_F && e->fts_statp->st_size >= (20LL << 20)) {
+				fprintf(stderr, "%8lld MB %s (file)\n", (long long)(e->fts_statp->st_size >> 20), e->fts_path);
+			}
+		}
+		if (fts != NULL)
+			fts_close(fts);
+	}
+}
+
+/* /var/tmp/sweet-kill.run holds program names: SIGKILL them (launchd starts them again on demand). */
+static void
+kill_run(void)
+{
+	FILE *f = fopen("/var/tmp/sweet-kill.run", "r");
+	char line[256] = "";
+	if (f == NULL)
+		return;
+	if (fgets(line, sizeof(line), f) == NULL)
+		line[0] = 0;
+	fclose(f);
+	unlink("/var/tmp/sweet-kill.run");
+	line[strcspn(line, "\n")] = 0;
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+	size_t sz = 0;
+	sysctl(mib, 3, NULL, &sz, NULL, 0);
+	struct kinfo_proc *kp = malloc(sz);
+	if (kp && sysctl(mib, 3, kp, &sz, NULL, 0) == 0)
+		for (size_t i = 0; i < sz / sizeof(*kp); i++) {
+			for (char *w = line; *w;) {
+				size_t wl = strcspn(w, " ");
+				if (wl && strlen(kp[i].kp_proc.p_comm) == wl && strncmp(kp[i].kp_proc.p_comm, w, wl) == 0)
+					fprintf(stderr, "kill %s %d -> %d\n", kp[i].kp_proc.p_comm, kp[i].kp_proc.p_pid,
+					    kill(kp[i].kp_proc.p_pid, SIGKILL));
+				w += wl;
+				while (*w == ' ')
+					w++;
+			}
+		}
+	free(kp);
+}
+
 int
 main(int argc, char **argv)
 {
 	setvbuf(stderr, NULL, _IONBF, 0);
+	if (access("/var/tmp/sweet-oslog.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
+		/* stream the unified log for 2 min for the programs named in the file, via sweet-oslog-dump */
+		char line[256] = "", *args[16] = { "/usr/local/bin/sweet-oslog-dump", "120" };
+		FILE *f = fopen("/var/tmp/sweet-oslog.run", "r");
+		if (f != NULL) {
+			if (fgets(line, sizeof(line), f) == NULL)
+				line[0] = 0;
+			fclose(f);
+		}
+		unlink("/var/tmp/sweet-oslog.run");
+		int na = 2;
+		for (char *t = strtok(line, " \n"); t != NULL && na < 15; t = strtok(NULL, " \n"))
+			args[na++] = t;
+		args[na] = NULL;
+		posix_spawn_file_actions_t fa;
+		posix_spawn_file_actions_init(&fa);
+		posix_spawn_file_actions_adddup2(&fa, 2, 1);
+		pid_t pid;
+		int st = 0;
+		if (posix_spawn(&pid, args[0], &fa, NULL, args, environ) == 0)
+			waitpid(pid, &st, 0);
+		fprintf(stderr, "sweet-oslog-dump status %#x\n", st);
+		return 0;
+	}
+	if (access("/var/tmp/sweet-kill.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
+		kill_run();
+		return 0;
+	}
+	if (access("/var/tmp/sweet-du.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
+		du_run();
+		return 0;
+	}
+	if (access("/var/tmp/sweet-inject.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
+		inject_run();
+		return 0;
+	}
 	if (access("/var/tmp/sweet-heic-ms.run", F_OK) == 0 && getenv("SWEET_HEIC_TRACED") == NULL) {
 		unlink("/var/tmp/sweet-heic-ms.run");
 		vt_check(DEFAULT_IMG);  /* saves the hvcC */

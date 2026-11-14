@@ -17,6 +17,7 @@
 | 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write | ✅ |
 | 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
 | 📱 Status bar / camera hole | Clock moved right of the front camera hole, right icons and Control Center carrier in place (`libsweet-sb`, kernel 0297) | ✅ |
+| 📷 Photos | Library is created since kernel 0301 (TCC sandbox extensions); the app still closes at start: the Metal device reports 0 as its texture size limit | ❌ |
 | 🖼️ Wallpaper / HEIC | Stock wallpapers and posters, the choice stays after a reboot; HEIC images decode since kernel 0300 (YCbCr IOSurface planes reported 0 bytes per row) - checked with a test program, on-screen check of an original HEIC wallpaper pending | ⚠️ |
 | ⌨️ Keyboard | Keys kept 12 pt off the curved sides (`libsweet-sb`); emoji / dictation layouts and landscape not checked | ⚠️ |
 | 🔆 Brightness | Slider, Control Center, auto-brightness, Night Shift | ✅ |
