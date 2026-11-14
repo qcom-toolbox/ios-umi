@@ -1,0 +1,233 @@
+From c9460fc5a253a1108b0541eadd802879bb6069f8 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:34:52 +0100
+Subject: [PATCH 296/297] umi: display (0296): the VIG pipe's scaler (QSEED4)
+ shows the whole 1125x2436 frame scaled to the 1080x2340 panel (x0.96) instead
+ of the centered crop that cut the status bar and dock; touches mapped the
+ same (sweetfb_fit=0 = old crop)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 108 ++++++++++++++++++++++++--
+ iokit/Kernel/arm/hid/SweetHID.cpp     |  15 +++-
+ 2 files changed, 115 insertions(+), 8 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 6164458..e925bc5 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -86,6 +86,10 @@ enum {
+  * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
++ * (0296) umi: with direct scanout the source pipe's scaler (VIG, QSEED) shrinks the whole
++ * 1125x2436 frame to the 1080x2340 panel (x 0.96, as the iPhone 12 mini's display pipe does)
++ * instead of cropping 20/25 px left/right and 48 px top/bottom (status bar and dock ran off
++ * the panel and under its rounded corners). Boot-arg sweetfb_fit=0 = the old crop.
+  */
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+@@ -141,6 +145,11 @@ public:
+ 	uint32_t      fPipeOff, fCtlOff, fFlushBits;
+ 	uint32_t      fBootSrc, fBootStride;
+ 	uint64_t      fScanPhys;      /* what the pipe fetches now */
++	bool          fFitOK;         /* (0296) the pipe can scale (VIG) and sweetfb_fit is on */
++	bool          fFitOn;         /* (0296) the pipe scales the logical frame to the panel now */
++	uint32_t      fBootRect[4];   /* (0296) ABL's SRC_SIZE, SRC_XY, OUT_SIZE, OUT_XY */
++	uint32_t      fBootPE[9];     /* (0296) ABL's pixel extension (0x100..0x128) */
++	uint32_t      fBootOpMode, fBootScalerOp;
+ 	bool          fDirect;        /* direct scanout set up */
+ 	bool          fLastDirect;    /* the last frame went out directly */
+ 	SweetSurface *fLastSurf;      /* surface of the last direct frame */
+@@ -156,7 +165,8 @@ public:
+ 	uint64_t      fGpuHoldUntil;  /* sweet_fb_gpu_begin(): no frames shown before then (mach time), boot framebuffer scanned */
+ 	int           fGpuHoldConsoleMuted;     /* sweet_console_muted before the hold; put back when it ends */
+ 	void          setupScanout();
+-	void          scanFrom(uint64_t pa, uint32_t stride);
++	void          scanFrom(uint64_t pa, uint32_t stride, bool fit = false);
++	void          setFit(bool fit);
+ 	void          scanBoot();
+ 	void          scanDump();
+ 	bool          directPresent(const uint8_t *rec);
+@@ -859,6 +869,9 @@ sweet_smmu_walk(uint64_t ttbr, uint32_t tcr, uint64_t iova, uint64_t *pa, uint64
+ }
+ 
+ static AppleCLCD *sweet_fb_direct;
++/* (0296) the panel shows the whole logical frame scaled (SweetHID maps touches by it) */
++extern "C" volatile int sweet_fb_fit_active;
++volatile int sweet_fb_fit_active;
+ 
+ static void
+ sweet_fb_panic_display(void)
+@@ -1057,6 +1070,24 @@ AppleCLCD::setupScanout()
+ 	fBootSrc = fPipe[0x14 / 4];
+ 	fBootStride = fPipe[0x24 / 4] & 0xffff;
+ 	fScanPhys = fBootSrc;
++	{
++		int fit = 1;
++		PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++		/* only the VIG pipes have a scaler; SM8250's is QSEED4 at +0xa00 (Linux dpu_hw_catalog) */
++		fFitOK = fit != 0 && umi && found < 4 && (fLogicalW != fWidth || fLogicalH != fHeight);
++		fBootRect[0] = fPipe[0x00 / 4];
++		fBootRect[1] = fPipe[0x08 / 4];
++		fBootRect[2] = fPipe[0x0c / 4];
++		fBootRect[3] = fPipe[0x10 / 4];
++		for (uint32_t i = 0; i < 9; i++) {
++			fBootPE[i] = fPipe[(0x100 + 0x10 * (i / 3) + 4 * (i % 3)) / 4];
++		}
++		fBootOpMode = fPipe[0x38 / 4];
++		fBootScalerOp = fPipe[(0xa00 + 0x04) / 4];
++		IOLog("SWEET FB: fit %s: %s src %#x xy %#x out %#x xy %#x op %#x fmt %#x, scaler v%#x op %#x\n",
++		    fFitOK ? "on" : "off", sweet_sspp[found].name, fBootRect[0], fBootRect[1], fBootRect[2],
++		    fBootRect[3], fBootOpMode, fPipe[0x30 / 4], fPipe[0xa00 / 4], fBootScalerOp);
++	}
+ 	if (fBootSrc != (uint32_t)fPhys) {
+ 		/* ABL scans a window of the framebuffer; keep it simple */
+ 		IOLog("SWEET FB: direct scanout off: %s fetches %#x, not the framebuffer start\n",
+@@ -1072,9 +1103,67 @@ AppleCLCD::setupScanout()
+ 	    sweet_sspp[found].name, ctl, fFlushBits, pool, slots, umi ? "" : " (not umi: untested)");
+ }
+ 
++/*
++ * (0296) Scale the logical frame (fLogicalW x fLogicalH) to the panel, or go back to ABL's 1:1 fetch.
++ * As Linux _dpu_plane_setup_scaler (QSEED3/4): bilinear Y/RGB + alpha, phase steps in 1.21 fixed
++ * point, preload 4/2, pixel extension request = the source size, no LUT. Latched with the next flush.
++ */
++void
++AppleCLCD::setFit(bool fit)
++{
++	if (fit == fFitOn) {
++		return;
++	}
++	volatile uint32_t *sc = fPipe + 0xa00 / 4;
++	if (fit) {
++		uint32_t sw = fLogicalW, sh = fLogicalH, dw = fWidth, dh = fHeight;
++		uint32_t sz = (sh << 16) | sw;
++		uint32_t stepx = (uint32_t)(((uint64_t)sw << 21) / dw), stepy = (uint32_t)(((uint64_t)sh << 21) / dh);
++		fPipe[0x00 / 4] = sz;                           /* SRC_SIZE */
++		fPipe[0x08 / 4] = 0;                            /* SRC_XY */
++		fPipe[0x0c / 4] = (dh << 16) | dw;              /* OUT_SIZE */
++		for (uint32_t c = 0; c < 3; c++) {              /* C0, C1C2, C3 */
++			fPipe[(0x100 + 0x10 * c) / 4] = 0;      /* LR */
++			fPipe[(0x104 + 0x10 * c) / 4] = 0;      /* TB */
++			fPipe[(0x108 + 0x10 * c) / 4] = sz;     /* REQ_PIXELS */
++		}
++		sc[0x90 / 4] = 0;                               /* PHASE_INIT Y_H, Y_V, UV_H, UV_V */
++		sc[0x94 / 4] = 0;
++		sc[0x98 / 4] = 0;
++		sc[0x9c / 4] = 0;
++		sc[0x10 / 4] = stepx & 0xffffff;                /* PHASE_STEP Y_H, Y_V, UV_H, UV_V */
++		sc[0x14 / 4] = stepy & 0xffffff;
++		sc[0x18 / 4] = stepx & 0xffffff;
++		sc[0x1c / 4] = stepy & 0xffffff;
++		sc[0x20 / 4] = 4 | (2 << 8) | (4 << 16) | (2 << 24);   /* PRELOAD (QSEED4 defaults) */
++		sc[0x40 / 4] = sw | (sh << 16);                 /* SRC_SIZE_Y_RGB_A */
++		sc[0x44 / 4] = sw | (sh << 16);                 /* SRC_SIZE_UV */
++		sc[0x48 / 4] = dw | (dh << 16);                 /* DST_SIZE */
++		uint32_t op = 1u | (3u << 16) | (1u << 31) | (1u << 14);       /* on, BIL, blend, not DX */
++		if (fPipe[0x30 / 4] & (1u << 8)) {
++			op |= (1u << 10) | (1u << 29);          /* alpha fetched: alpha BIL */
++		}
++		sc[0x04 / 4] = op;
++		fPipe[0x38 / 4] = fBootOpMode | (1u << 31);     /* SRC_OP_MODE: PE override */
++	} else {
++		fPipe[0x00 / 4] = fBootRect[0];
++		fPipe[0x08 / 4] = fBootRect[1];
++		fPipe[0x0c / 4] = fBootRect[2];
++		fPipe[0x10 / 4] = fBootRect[3];
++		for (uint32_t i = 0; i < 9; i++) {
++			fPipe[(0x100 + 0x10 * (i / 3) + 4 * (i % 3)) / 4] = fBootPE[i];
++		}
++		sc[0x04 / 4] = fBootScalerOp;
++		fPipe[0x38 / 4] = fBootOpMode;
++	}
++	fFitOn = fit;
++	sweet_fb_fit_active = fit;
++}
++
+ void
+-AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
++AppleCLCD::scanFrom(uint64_t pa, uint32_t stride, bool fit)
+ {
++	setFit(fit && fFitOK);
+ 	fPipe[0x14 / 4] = (uint32_t)pa;
+ 	fPipe[0x24 / 4] = (fPipe[0x24 / 4] & 0xffff0000u) | stride;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+@@ -1294,13 +1383,21 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 	uint32_t id = get32(rec, 0x54 + 4 * layer);
+ 	if (s->scanoutPhys != 0 && s->bytesPerElement == 4 && s->width >= fWidth && s->height >= fHeight) {
+ 		uint32_t ox = (s->width - fWidth) / 2, oy = (s->height - fHeight) / 2;
++		uint32_t fw = fWidth, fh = fHeight;             /* what the pipe fetches */
++		bool fit = false;
+ 		if (s->width == fLogicalW && s->height == fLogicalH) {
+ 			ox = (uint32_t)fOffX;
+ 			oy = (uint32_t)fOffY;
++			if (fFitOK) {
++				fit = true;             /* (0296) the whole frame, scaled to the panel */
++				ox = oy = 0;
++				fw = fLogicalW;
++				fh = fLogicalH;
++			}
+ 		}
+ 		uint64_t off = s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4;
+ 		uint64_t pa = s->scanoutPhys + off;
+-		uint64_t len = (uint64_t)(fHeight - 1) * s->bytesPerRow + (uint64_t)fWidth * 4;
++		uint64_t len = (uint64_t)(fh - 1) * s->bytesPerRow + (uint64_t)fw * 4;
+ 		uintptr_t va = s->kernelAddress();
+ 		if ((pa & 0xf) == 0 && pa + len <= (1ull << 32) && off + len <= s->allocSize && va != 0 &&
+ 		    s->bytesPerRow <= 0xffff) {
+@@ -1313,7 +1410,7 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 			if (sample || sweet_fb_scanflush()) {
+ 				sweet_dcache_flush(va + off, len);
+ 			}
+-			scanFrom(pa, s->bytesPerRow);
++			scanFrom(pa, s->bytesPerRow, fit);
+ 			ok = true;
+ 			/* sampled on every 128th present (the first two log the whole-allocation walk):
+ 			 * left/middle/right of nine rows - the content's geometry at present time */
+@@ -1364,7 +1461,8 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 			SweetSurface *old = fLastSurf;
+ 			s->retain();
+ 			fLastSurf = s;
+-			fLastOff = off;
++			/* the fade copies a panel-sized window 1:1: the crop window when the frame was scaled */
++			fLastOff = fit ? s->offset + (uint64_t)fOffY * s->bytesPerRow + (uint64_t)fOffX * 4 : off;
+ 			IOLockUnlock(fLock);
+ 			OSSafeReleaseNULL(old);
+ 		} else if (sweet_fb_direct_fail[3]++ < 4) {
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 9aa5553..24151f9 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -493,6 +493,8 @@ SweetHIDButtons::testFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ }
+ 
++extern "C" volatile int sweet_fb_fit_active;     /* SweetFramebuffer.cpp (0296) */
++
+ bool
+ SweetHIDTouch::start(IOService *provider)
+ {
+@@ -536,9 +538,16 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp): the panel shows its
++	 * centered crop, or (0296, sweet_fb_fit_active) the whole frame scaled to the panel. */
++	IOFixed nx, ny;
++	if (sweet_fb_fit_active) {
++		nx = (IOFixed)((((int64_t)x << 16) + (1 << 15)) / fPanelW);
++		ny = (IOFixed)((((int64_t)y << 16) + (1 << 15)) / fPanelH);
++	} else {
++		nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
++		ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	}
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+-- 
+2.54.0 (Apple Git-157)
+

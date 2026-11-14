@@ -15,7 +15,9 @@
 | 🧠 CPU | All 8 cores; clocks follow the load (EPSS governor, 75 °C limit) | ✅ |
 | 🧮 RAM | 6 GB of the 8 GB for iOS (0x100000000-0x280000000). 6.66 GB (from 0xd6000000) booted but the persistent log stopped writing, so it is off for now | ✅ |
 | 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write | ✅ |
-| 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel | ✅ |
+| 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
+| 📱 Status bar / camera hole | Clock moved right of the front camera hole, right icons and Control Center carrier in place (`libsweet-sb`, kernel 0297) | ✅ |
+| ⌨️ Keyboard | Keys kept 12 pt off the curved sides (`libsweet-sb`); emoji / dictation layouts and landscape not checked | ⚠️ |
 | 🔆 Brightness | Slider, Control Center, auto-brightness, Night Shift | ✅ |
 | 👆 Touch | ST FTM5 | ✅ |
 | 🔘 Buttons | Power, volume up/down | ✅ |

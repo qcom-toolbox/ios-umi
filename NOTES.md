@@ -2,6 +2,47 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-14 15:35: STATUS BAR, DOCK, CORNERS, CAMERA HOLE AND KEYBOARD FIXED (user-verified)** (patches
+  `xnu/patches/0296-umi-display-scaler-fit.patch` + `0297-umi-exec-statusbar-lib.patch`, image
+  **`shim/out/umi-0297-statusbar.img`** = 0295 boot-args + 0296 + 0297; phone file `/usr/local/lib/libsweet-sb.dylib`
+  (new, 68912 bytes, read back; source `phone/sweet-sb/sweet_sb_inject.c`, `phone/build-sweet-sb.sh install`)).
+  User: status bar fully visible, clock off the camera hole, right icons and Control Center carrier in place, dock
+  inside the rounded corners, GPU as before, keyboard off the curved sides ("all good"; P looks ~2 px narrower).
+  - Cause: AppleCLCD presents 1125x2436 (iPhone X) and the panel scanned out its centered 1080x2340 window (offsets
+    20 / 48): 20-25 px of each side and 48 px top / bottom never showed (clock against the top edge, battery in the
+    top-right corner, dock wider than the panel). UIKit picks `_UIStatusBarVisualProvider_Split1125` (a
+    FixedSplit: native width 1125 + SpringBoard's built-in D22 notch shape; no MobileGestalt key for it), which
+    centres the clock in the left ear at ~41 pt - where the Mi 10's hole is (LineageOS umi overlay: centre
+    (133, 58) px, r 31; corners r 128 px; = x 35..57 pt after the scale below).
+  - **0296** (SweetFramebuffer.cpp, SweetHID.cpp): ABL's pipe is VIG0, which has a scaler (SM8250 QSEED4 at
+    +0xa00). Direct presents of a full 1125x2436 surface fetch the whole frame and scale it to 1080x2340 (x0.96,
+    as an iPhone 12 mini's display pipe does): as Linux `_dpu_plane_setup_scaler` - bilinear, 1.21 phase steps,
+    preload 4/2, pixel-extension request = source size, PE override, no LUT. The boot framebuffer, panic screen,
+    copy fallback and fade keep ABL's 1:1 fetch (registers saved at setup, restored). Touch maps panel -> logical
+    by proportion while `sweet_fb_fit_active`. Log `SWEET FB: fit on: VIG0 src ...`. `sweetfb_fit=0` = old crop.
+  - **0297** (kern_exec.c): the boot line is at 600 of 608 chars, so no boot-arg: at the first exec the kernel
+    looks up `/usr/local/lib/libsweet-sb.dylib` and only if it exists adds the group "LIB *" to kern.exec_inject
+    (every program but launchd); `sweet_exec_inject_names` now also takes "*" (dyld policy 0xff). Missing file =
+    nothing inserted (a missing inserted library would stop dyld everywhere). `sweetsb=0` = off. Fallback if a
+    library build breaks the UI: boot 0295 (no 0297), remove the file.
+  - libsweet-sb: +[Split1125 leadingCenteringOffset] +44 pt (clock centre ~85 pt). FixedSplit derives the right
+    inset as leadingCenteringEdgeInset + trailingCenteringOffset and the pill's from the leading one, so
+    Split1125 gets its own -trailingCenteringEdgeInset (-44). Tried first and dropped: hooking
+    +trailingCenteringOffset (right icons fine, but Control Center's carrier sits at expandedEdgeInset +
+    trailingCenteringOffset: moved 44 pt left) and +pillCenteringOffset (would shift the pill twice).
+  - Keyboard (same library): keys kept 12 pt in from each side. Tried: scale on UIKeyboardLayoutStar (placement
+    right, P / L cut), narrower star frames (keyboard partly off the screen), **scale on its superview
+    UIKeyboardImpl** (kept). View chain written to `/var/tmp/sweet-kb-PROGRAM.txt` at the first layout: star 375 pt,
+    UIKeyboardImpl 375 pt bounds scaled 0.936 at x 12, background views full width, nothing clips.
+    `/usr/local/etc/sweet-sb.txt` "DX INSET MODE" overrides (default 44 12 2; inset 0 = keyboard off).
+  - Not done: the keyboard's other layouts (emoji, dictation) untouched; landscape not checked; an app already
+    running keeps the old library until relaunched (SpringBoard until reboot).
+  - Mistake on the way: the first 0296 image was built with umi-boot-image.sh's bare defaults (no sweetgpu,
+    Wi-Fi, audio, BT, USB log) - "no GPU acceleration". Images must carry the 0295 extras.
+  - Seen in this session (not fixed, separate): the phone's USB Ethernet stops answering a few minutes into a boot
+    (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
+    (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
+
 - **2026-11-14 14:20: 0294's off / on blip: wifid answered it (sets POWER on) but still no join; status bar Wi-Fi
   icon greyed while joined at ~280 Mbit/s (user); 0295 gives wifid a noise floor and SNR** (patch
   `xnu/patches/0295-umi-wlan-noise-snr.patch`, image **`shim/out/umi-0295-wifi-noise.img`**, built, not booted).

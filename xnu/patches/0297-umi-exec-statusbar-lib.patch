@@ -1,0 +1,61 @@
+From e54bab42816431f6927dad713a72f63f3028e488 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:34:52 +0100
+Subject: [PATCH 297/297] umi: exec (0297): /usr/local/lib/libsweet-sb.dylib
+ (status bar clock clear of the camera hole, keyboard off the curved sides)
+ inserted into every program when the file exists; '*' also answers dyld's
+ policy (sweetsb=0 = off)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/kern/kern_exec.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index e8529d4..cc8b72d 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5605,6 +5605,7 @@ bad:
+  * kernel adds this one. Starts from the boot-arg sweetinject (commas instead of spaces).
+  */
+ static char exec_inject_conf[512];
++#define SWEET_SB_LIB "/usr/local/lib/libsweet-sb.dylib"
+ static int exec_inject_loaded;
+ SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
+     "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
+@@ -5626,6 +5627,22 @@ exec_inject_env(struct image_params *imgp, char *env, size_t size)
+ 			}
+ 			strlcpy(exec_inject_conf, arg, sizeof(exec_inject_conf));
+ 		}
++		/*
++		 * (0297) umi status bar: /usr/local/lib/libsweet-sb.dylib (moves the clock right of the camera
++		 * hole) goes into every program, but only if the file is there - a missing inserted library
++		 * stops dyld in every process. Boot-arg sweetsb=0: never.
++		 */
++		int sb = 1;
++		vnode_t sbvp = NULLVP;
++		PE_parse_boot_argn("sweetsb", &sb, sizeof(sb));
++		if (sb != 0 && vnode_lookup(SWEET_SB_LIB, 0, &sbvp, imgp->ip_vfs_context) == 0) {
++			vnode_put(sbvp);
++			if (exec_inject_conf[0] != 0) {
++				strlcat(exec_inject_conf, ";", sizeof(exec_inject_conf));
++			}
++			strlcat(exec_inject_conf, SWEET_SB_LIB " *", sizeof(exec_inject_conf));
++			printf("SWEET EXEC: %s goes into every program (sweetsb=0: off)\n", SWEET_SB_LIB);
++		}
+ 		exec_inject_loaded = 1;
+ 	}
+ 	p = exec_inject_conf;
+@@ -5705,6 +5722,9 @@ sweet_exec_inject_names(const char *name)
+ 			if ((size_t)(p - word) == namelen && strncmp(word, name, namelen) == 0) {
+ 				return true;
+ 			}
++			if (p - word == 1 && *word == '*') {
++				return true;    /* (0297) "*" = every program, as exec_inject_env */
++			}
+ 		}
+ 	}
+ 	return false;
+-- 
+2.54.0 (Apple Git-157)
+
