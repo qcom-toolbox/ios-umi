@@ -1,0 +1,47 @@
+From 41f6efd93f2e4866b73e1351bd0914e34d73460e Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:12:25 +0100
+Subject: [PATCH] umi: wlan (0304): a refused Apple80211 set logs its first 64
+ bytes (3 times per kind) - wifid sets 383 (4104 bytes) after every power on,
+ find what it hands the driver
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/redwood_apple80211.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 3804035..88f3681 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -778,5 +778,27 @@ redwood_apple80211_ioctl(u_long command, void *data)
+ 			printf("error %d\n", error);
+ 		}
+ 	}
++	/* What a refused set carries: the first 64 bytes, a few times for each kind (local log only). */
++	if (is_set && error == EOPNOTSUPP && request->req_data != USER_ADDR_NULL && request->req_len > 0) {
++		static struct { int type; unsigned times; } dumped[8];
++		unsigned k;
++
++		for (k = 0; k < 8 && dumped[k].times != 0 && dumped[k].type != request->req_type; k++) {
++		}
++		if (k < 8 && dumped[k].times < 3) {
++			uint8_t bytes[64] = { 0 };
++			char hex[64 * 2 + 8 + 1];
++			unsigned n = request->req_len < sizeof(bytes) ? request->req_len : sizeof(bytes);
++
++			dumped[k].type = request->req_type;
++			dumped[k].times++;
++			if (copyin(request->req_data, bytes, n) == 0) {
++				for (unsigned b = 0; b < n; b++) {
++					snprintf(hex + b * 2 + b / 8, 4, "%02x%s", bytes[b], b % 8 == 7 ? " " : "");
++				}
++				printf("apple80211: refused set %d carries: %s\n", request->req_type, hex);
++			}
++		}
++	}
+ 	return error;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

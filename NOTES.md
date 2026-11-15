@@ -283,6 +283,16 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 15:15: 0295 booted (in 0303, two boots): still no join at boot; 0304 dumps what wifid's refused
+  set 383 carries** (patch `xnu/patches/0304-umi-wlan-refused-dump.patch`, kernel 41f6efd on top of 0303, image
+  **`shim/out/umi-0304-wifi-dump.img`** = 0295 boot-args + 0296..0304, built, not booted).
+  - 0303 boots (13:59 and 14:04 UTC): en0 175 s after boot, 33-35 s after the clock was set; wifid sets POWER on,
+    scans (SCAN_REQ 29), CURRENT_NETWORK error 6, and **sets 383 (4104 bytes) after each power on - REFUSED**; no
+    ASSOCIATE. 383 was refused 706 times in the 0286..0294 logs too. Guess: wifid hands the driver its saved
+    networks (driver/firmware auto-join), and gives up when refused. 0304 logs the first 64 bytes of a refused set,
+    3 times per kind (local log only: the bytes may hold network names).
+  - Mac disk was full (244 MB free): the UDP log receiver died (ENOSPC); old scratch kernels removed, log gzipped.
+
 - **2026-11-14 14:20: 0294's off / on blip: wifid answered it (sets POWER on) but still no join; status bar Wi-Fi
   icon greyed while joined at ~280 Mbit/s (user); 0295 gives wifid a noise floor and SNR** (patch
   `xnu/patches/0295-umi-wlan-noise-snr.patch`, image **`shim/out/umi-0295-wifi-noise.img`**, built, not booted).
