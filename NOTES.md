@@ -283,6 +283,18 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 15:50: crash loop = speech synthesizer extensions without a container path; 0307** (patch
+  `xnu/patches/0307-umi-sandbox-appex-container.patch`, kernel a05e6a8 on top of 0305 (0306 reverted), image
+  **`shim/out/umi-0307-appex-container.img`** = 0305's boot line, built, not booted).
+  - On a 0305 boot: KonaSynthesizer 36, MacinTalkAUSP 36, SiriTTSSynthesizer 34+ crashes (SIGABRT, uncaught ObjC
+    exception), FitnessWidget 15 (SIGTRAP), Weather/Pride posters, StocksDetailIntents, MobileTimerIntents, pkreporter 3
+    each; ReportCrash 54 %, analyticsd 89 %, aggregated 184 % of a core while the CPUs were thermally capped.
+  - The speech extensions abort in PlugInKit (func 0x1aaf39c64, 20H392): `sandbox_container_path_for_pid(getpid())`
+    fails -> exception. libsystem_sandbox calls `__sandbox_ms("Sandbox", 4, {pid, 0, buffer, size, 0})`; our stand-in
+    answered ENOENT to everyone. **0307**: op 4 copies out "/private/var/mobile" when the target's executable path
+    contains ".appex/" (proc_getexecutablevnode + vn_getpath); every other process still gets ENOENT.
+  - FitnessWidget (SIGTRAP, its own code) is a different crash, not addressed.
+
 - **2026-11-15 15:45: HEIC wallpaper heavy = CoreAnimation gain-map layers; picker previews black = refused read-only
   no-copy buffers** (phone files changed, user OK'd; kernel stays 0305).
   - On 0305 with the iOS 16 HEIC wallpaper set: backboardd GPU wait ~17 ms per frame, ~10 fps, 300+ fence waits timed

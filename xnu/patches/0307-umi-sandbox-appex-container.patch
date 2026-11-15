@@ -1,0 +1,78 @@
+From a05e6a8dfcd8a94de733c8b48569de0900a9e20e Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:48:18 +0100
+Subject: [PATCH] umi: Sandbox stand-in (0307): container path (op 4) for app
+ extensions is the mobile home - PlugInKit raised an exception in every
+ extension whose container path failed (speech synthesizer extensions
+ crash-looped ~36 times each per boot, keeping ReportCrash and analyticsd
+ busy)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/kern/sweet_amfi.c | 43 ++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index f504a1c..fbb1af1 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -24,6 +24,7 @@
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <kern/debug.h>
++#include <kern/kalloc.h>
+ #include <kern/startup.h>
+ #include <machine/atomic.h>
+ #include <libkern/amfi/amfi.h>
+@@ -326,7 +327,47 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ 		int64_t h = os_atomic_inc(&sweet_sandbox_handle, relaxed);
+ 		return copyout(&h, (user_addr_t)a[2], sizeof(h));
+ 	}
+-	case 4:         /* container path (audit token / pid) */
++	case 4: {       /* container path: arg -> {pid (0 = caller), audit token, buffer, size, 0} */
++		/*
++		 * (0307) PlugInKit raises an exception in an app extension whose container path is unknown
++		 * (sandbox_container_path_for_pid failing): the speech synthesizer extensions (KonaSynthesizer,
++		 * MacinTalkAUSP, SiriTTSSynthesizer) died at every launch, ~36 times each per boot, with ReportCrash
++		 * and analyticsd busy on them. Extensions (executables inside an .appex) are given the mobile user's
++		 * home; every other process keeps "no container".
++		 */
++		uint64_t a[5];
++		if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0 || a[2] == 0 || a[3] == 0) {
++			return ENOENT;
++		}
++		proc_t t = a[0] != 0 ? proc_find((int)a[0]) : p;
++		if (t == NULL) {
++			return ENOENT;
++		}
++		bool appex = false;
++		vnode_t vp = proc_getexecutablevnode(t);
++		if (vp != NULLVP) {
++			char *path = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO);
++			int len = MAXPATHLEN;
++			if (path != NULL && vn_getpath(vp, path, &len) == 0 && strnstr(path, ".appex/", MAXPATHLEN) != NULL) {
++				appex = true;
++			}
++			if (path != NULL) {
++				kfree_data(path, MAXPATHLEN);
++			}
++			vnode_put(vp);
++		}
++		if (t != p) {
++			proc_rele(t);
++		}
++		if (!appex) {
++			return ENOENT;
++		}
++		static const char home[] = "/private/var/mobile";
++		if (a[3] < sizeof(home)) {
++			return ERANGE;
++		}
++		return copyout(home, (user_addr_t)a[2], sizeof(home));
++	}
+ 	case 0x43:      /* container expected */
+ 		return ENOENT;
+ 	default:
+-- 
+2.54.0 (Apple Git-157)
+
