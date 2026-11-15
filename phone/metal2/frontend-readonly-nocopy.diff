@@ -1,0 +1,42 @@
+--- /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm.pre-rocopy	2026-11-15 15:37:37
++++ /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm	2026-11-15 15:37:48
+@@ -157,6 +157,18 @@
+ @property(nonatomic,strong) id<MTLHeap> parentHeap;
+ @property(nonatomic) int responsibleProcess;
+ @end
++// Every page of [p, p+n) is mapped without write permission in this process.
++static bool readOnlyRange(const void *p,size_t n) {
++ vm_address_t at=(vm_address_t)(uintptr_t)p;const vm_address_t end=at+n;
++ while(at<end) {
++  vm_address_t addr=at;vm_size_t size=0;vm_region_basic_info_data_64_t info;
++  mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t object=MACH_PORT_NULL;
++  if(vm_region_64(mach_task_self(),&addr,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object)!=KERN_SUCCESS)return false;
++  if(addr>at || (info.protection&VM_PROT_WRITE))return false;
++  at=addr+size;
++ }
++ return true;
++}
+ @implementation NBBuffer
+ - (void)dealloc {
+  const NSUInteger length=nmb_buffer_length(_handle);nmb_buffer_release(_handle);
+@@ -2202,6 +2214,20 @@
+ }
+ - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
+  NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,pointer,length,options);
++ // SweetMetal2: the kernel pins a client's pages for the GPU only when they can be wired for writing, so memory the process
++ // cannot write (an image file ImageIO mapped, a decoded image kept write-protected) was refused here - 60+ times per boot in
++ // backboardd and PosterBoard, and the wallpaper picker's previews came out as black boxes. Such memory cannot change, so a
++ // buffer holding a copy of it is the same buffer: it is made instead, and the client's deallocator still runs when it goes.
++ if(!handle && pointer && length && readOnlyRange(pointer,length)) {
++  NmbBuffer *copy=nmb_buffer_new(gDevice,length,options,pointer);
++  if(copy) {
++   static std::atomic<unsigned> told{0};
++   if(told.fetch_add(1)<4)NBLOG(@"native-metal: no-copy buffer over read-only memory (%lu bytes): made as a copy",(unsigned long)length);
++   NBBuffer *buffer=[NBBuffer new];buffer.handle=copy;buffer.options=options;
++   buffer.wrapped=pointer;buffer.deallocator=deallocator;
++   return (id<MTLBuffer>)buffer;
++  }
++ }
+  if(!handle){NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
+  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
+  buffer.wrapped=pointer;buffer.deallocator=deallocator;

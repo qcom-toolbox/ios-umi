@@ -283,6 +283,20 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 15:45: HEIC wallpaper heavy = CoreAnimation gain-map layers; picker previews black = refused read-only
+  no-copy buffers** (phone files changed, user OK'd; kernel stays 0305).
+  - On 0305 with the iOS 16 HEIC wallpaper set: backboardd GPU wait ~17 ms per frame, ~10 fps, 300+ fence waits timed
+    out per 10 s, black chunks and repeated frames (before the wallpaper: ~0.07 ms). **backboardd env
+    `CA_DISABLE_GAIN_MAP_LAYERS=1`** (launchd.plist, next to CA_DISABLE_DETACHED; previous file
+    `launchd.plist.sweet-pre-gainmap` on the phone and in `~/ios-umi-backup/gpu-2026-11-15/`): GPU wait ~0.1 ms, 32 fps
+    (= sweetfb_hz=30). User: wallpaper fine, picker previews still black boxes.
+  - SweetMetal2: `newBufferWithBytesNoCopy` over memory with no write permission in any page (vm_region_64) is made as a
+    copy (nmb_buffer_new with the bytes) instead of refused; the client's deallocator still runs. Such memory cannot
+    change, so the copy is exact (kernel 0306 tried pinning it read-only instead and lost backboardd's device).
+    Diff `phone/metal2/frontend-readonly-nocopy.diff`, build `xnu-work/work/m2v-bridge-src/out-rocopy` (sha256
+    38651f4e...); previous plugin (c4c5d075...) as `SweetMetal2.sweet-pre-rocopy` on the phone and in the backup dir.
+    Logs "no-copy buffer over read-only memory (N bytes): made as a copy" (4 per process). Not yet checked.
+
 - **2026-11-15 15:25: 0305 booted: Photos grid fine (user); HEIC wallpaper fine once set, picker slow / flickering /
   blocks; 0306 = read-only GPU host imports** (patch `xnu/patches/0306-umi-gpu-readonly-host-import.patch`, kernel
   fa28c34 on top of 0305, image **`shim/out/umi-0306-ro-import.img`** = 0305's boot line, built, not booted).
