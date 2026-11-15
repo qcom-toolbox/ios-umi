@@ -67,6 +67,24 @@ decode(const char *path)
 	}
 	fprintf(stderr, "image: %zux%zu bpc %zu bpp %zu\n", CGImageGetWidth(img), CGImageGetHeight(img),
 	    CGImageGetBitsPerComponent(img), CGImageGetBitsPerPixel(img));
+	{
+		/* the IOSurface behind the image, if any (CoreAnimation / Photos texture it directly) */
+		extern CFTypeRef CGImageGetProperty(CGImageRef, CFStringRef);
+		extern const CFStringRef kCGImagePropertyIOSurface;
+		IOSurfaceRef sf = (IOSurfaceRef)CGImageGetProperty(img, kCGImagePropertyIOSurface);
+		if (sf == NULL) {
+			fprintf(stderr, "image IOSurface: none\n");
+		} else {
+			OSType pf = IOSurfaceGetPixelFormat(sf);
+			fprintf(stderr, "image IOSurface: %.4s %zux%zu bpr %zu planes %zu", (const char *)&(OSType){CFSwapInt32HostToBig(pf)},
+			    IOSurfaceGetWidth(sf), IOSurfaceGetHeight(sf), IOSurfaceGetBytesPerRow(sf), IOSurfaceGetPlaneCount(sf));
+			for (size_t i = 0; i < IOSurfaceGetPlaneCount(sf); i++)
+				fprintf(stderr, " | p%zu %zux%zu bpr %zu bpe %zu", i, IOSurfaceGetWidthOfPlane(sf, i),
+				    IOSurfaceGetHeightOfPlane(sf, i), IOSurfaceGetBytesPerRowOfPlane(sf, i),
+				    IOSurfaceGetBytesPerElementOfPlane(sf, i));
+			fprintf(stderr, "\n");
+		}
+	}
 	fprintf(stderr, "-- CGDataProviderCopyData\n");
 	CFDataRef d = CGDataProviderCopyData(CGImageGetDataProvider(img));
 	if (d == NULL) {
@@ -79,7 +97,47 @@ decode(const char *path)
 	for (CFIndex i = 0; i < n; i++) {
 		nz += b[i] != 0;
 	}
-	fprintf(stderr, "pixels: %ld bytes, %ld non-zero\n", (long)n, (long)nz);
+	static uint8_t *prev;
+	static CFIndex prevn;
+	if (prev != NULL && prevn == n) {
+		size_t bpr = CGImageGetBytesPerRow(img), diff = 0, r0 = (size_t)-1, r1 = 0, rows = 0, lastrow = (size_t)-1;
+		for (CFIndex i = 0; i < n; i++)
+			if (prev[i] != b[i]) {
+				size_t r = (size_t)i / bpr;
+				diff++;
+				if (r < r0)
+					r0 = r;
+				if (r > r1)
+					r1 = r;
+				if (r != lastrow) {
+					rows++;
+					lastrow = r;
+				}
+			}
+		fprintf(stderr, "vs previous decode: %zu bytes differ in %zu rows (%zu..%zu), bpr %zu\n", diff, rows,
+		    diff ? r0 : 0, r1, bpr);
+	}
+	{
+		/* raw RGBA of each decode for a look on the Mac: /var/tmp/sweet-heic-decode-N.raw */
+		static int dumpno;
+		char dp[64];
+		snprintf(dp, sizeof(dp), "/var/tmp/sweet-heic-decode-%d.raw", dumpno++);
+		FILE *df = fopen(dp, "wb");
+		if (df != NULL) {
+			fwrite(b, 1, (size_t)n, df);
+			fclose(df);
+		}
+		fprintf(stderr, "raw %s: %zux%zu bpr %zu bitmapinfo %#x\n", dp, CGImageGetWidth(img), CGImageGetHeight(img),
+		    CGImageGetBytesPerRow(img), (unsigned)CGImageGetBitmapInfo(img));
+	}
+	free(prev);
+	prev = malloc((size_t)n);
+	memcpy(prev, b, (size_t)n);
+	prevn = n;
+	uint64_t h = 1469598103934665603ULL;
+	for (CFIndex i = 0; i < n; i++)
+		h = (h ^ b[i]) * 1099511628211ULL;
+	fprintf(stderr, "pixels: %ld bytes, %ld non-zero, fnv %016llx\n", (long)n, (long)nz, (unsigned long long)h);
 	CFRelease(d);
 	CGImageRelease(img);
 	return nz ? 0 : 1;
@@ -493,7 +551,7 @@ main(int argc, char **argv)
 	if (getenv("SWEET_HEIC_TRACED") == NULL) {
 		/* one traced child per pass: default (remote decoder), then VideoToolbox restrictions that run the
 		 * decoder in this process (0x8) and also avoid hardware transfer / decoders (0xb) */
-		static const char *passes[] = { "0" };
+		static const char *passes[] = { "0x1" };
 		for (unsigned p = 0; p < sizeof(passes) / sizeof(passes[0]); p++) {
 			char r[64];
 			snprintf(r, sizeof(r), "SWEET_HEIC_RESTRICT=%s", passes[p]);

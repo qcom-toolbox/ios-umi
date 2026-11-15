@@ -101,6 +101,22 @@
     previous (d21e0263...) as `SweetMetal2.sweet-pre-limits` next to it and in `~/ios-umi-backup/gpu-2026-11-14/`.
     Loads at the next reboot.
 
+- **2026-11-15 15:20: HEIC PIXELS CORRECT (kernel 0303, probe-verified)** (patches `xnu/patches/0302-umi-iosurface-child-surfaces.patch`,
+  `0303-umi-iosurface-use-count.patch`, kernel 3159a4a + edfa24c, image **`shim/out/umi-0303-surface-usecount.img`** = 0301 boot
+  line + 0302 + 0303). User had reported the stock iOS 16 wallpaper "glitching around" in the picker on 0301.
+  - On 0301 the decode "worked" but the pixels differed on every decode; dumped vs the Mac's decode (`sips`), tiles were
+    duplicated / misplaced / black (only the bottom-right 512 tile right). Tile matching showed two output tiles holding the
+    same source tile -> tile buffers reused while still in use.
+  - **Cause (0303): IOSurface use counts were ignored.** `IOSurfaceIsInUse` = `[[client+0x70] + 0x18] != 0` (u64 at +0x18 of the
+    surface's state page); traps 0/1 (Increment/DecrementUseCount, id, category) were stubs, so every surface looked unused
+    and CoreVideo pools handed CMPhoto tile buffers it still held. 0303 keeps the count at state +0x18, per client view
+    (SweetSurfaceRef.uses, given back when the view is freed). Likely matters for anything pooled (video, camera, Photos).
+  - 0302 (also real, not this bug): child surfaces (IOSurfaceCreateChildSurface = create with the parent id as scalar 0)
+    now share the parent's memory (sharesParent: no wired accounting / complete() on free); they used to get fresh memory.
+    CMPhoto imports IOSurfaceCreateChildSurface but the probe's decode made no child (no "SWEET SURF: child of" line).
+  - Probe on 0303: two decodes byte-identical (fnv 70e3a0c4d4c0e11b), per-tile mean |diff| vs the Mac 0.1-0.4.
+    Wallpaper on screen: to check (the iOS 16 wallpaper uses its original HEIC files again).
+
 - **2026-11-14 21:00: root volume grown online from 16 to 32 GiB (no reflash, no backup - user's choice)**: the probe
   (`/var/tmp/sweet-grow.run` = size in GiB, 17..100) calls `fsctl("/", HFSIOC_RESIZE_VOLUME = _IOW('h', 2, u64))`
   -> hfs_extendfs on the mounted journaled HFS+ root; the UFS driver answers DKIOCGETBLOCKCOUNT with the whole

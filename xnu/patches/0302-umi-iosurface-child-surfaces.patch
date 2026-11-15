@@ -1,0 +1,99 @@
+From 3159a4ad41d5cc5fe75f79e42c4241a9d132be9b Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 14:55:36 +0100
+Subject: [PATCH] umi: IOSurface (0302): child surfaces share their parent's
+ memory (IOSurfaceCreateChildSurface) - they got fresh memory, so HEIC tiles
+ CMPhoto decodes into children of the output never reached it (black / stale /
+ misplaced tiles)
+
+---
+ iokit/Kernel/arm/SweetSurface.cpp | 42 +++++++++++++++++++++++++++++--
+ iokit/Kernel/arm/SweetSurface.h   |  3 ++-
+ 2 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 58e8e05..d46206f 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -256,12 +256,12 @@ SweetSurface::free()
+ 		IOLockUnlock(sweet_surface_lock);
+ 		liveSlot = -1;
+ 	}
+-	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
++	if (!sharesParent && OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
+ 		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
+ 	}
+ 	OSSafeReleaseNULL(kernelMap);
+ 	OSSafeReleaseNULL(values);
+-	if (wrapped && memory != NULL) {
++	if (wrapped && !sharesParent && memory != NULL) {
+ 		memory->complete();
+ 	}
+ 	OSSafeReleaseNULL(memory);
+@@ -897,6 +897,44 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 	 * icon was a transparent square.
+ 	 */
+ 	OSNumber *client_address = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAddress"));
++	/*
++	 * (0302) Child surfaces (IOSurfaceCreateChildSurface: create with the parent's id as scalar 0) are views
++	 * of the parent's memory: their offset and plane offsets count from its start. They used to get fresh
++	 * memory, so what was written through a child never reached the parent - CMPhoto decodes HEIC tiles
++	 * into children of the output image, which came out with black, stale and misplaced tiles.
++	 */
++	if (ret == kIOReturnSuccess && client_address == NULL && s->parentID != 0) {
++		SweetSurface *parent = sweet_surface_copy(s->parentID);
++		uint64_t used = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);
++		for (uint32_t i = 0; i < s->planeCount; i++) {
++			if ((uint64_t)s->planes[i].offset + s->planes[i].size > used) {
++				used = (uint64_t)s->planes[i].offset + s->planes[i].size;
++			}
++		}
++		if (parent == NULL || parent->memory == NULL) {
++			ret = kIOReturnNotFound;
++		} else if (used > parent->allocSize) {
++			ret = kIOReturnBadArgument;
++		} else {
++			s->memory = parent->memory;
++			s->memory->retain();
++			s->allocSize = parent->allocSize;
++			s->mapCache = parent->mapCache;
++			s->wrapDelta = parent->wrapDelta;
++			s->wrapped = parent->wrapped;
++			s->sharesParent = true;
++			if (!sweet_surface_publish(s)) {
++				ret = kIOReturnNoResources;
++			}
++		}
++		static uint32_t told_child;
++		if (told_child++ < 16) {
++			IOLog("SWEET SURF: child of %u: %ux%u fmt 0x%x offset %u bpr %u planes %u (needs %llu of %u) -> 0x%x\n",
++			    s->parentID, s->width, s->height, s->pixelFormat, s->offset, s->bytesPerRow, s->planeCount, used,
++			    parent ? parent->allocSize : 0, ret);
++		}
++		OSSafeReleaseNULL(parent);
++	}
+ 	if (ret == kIOReturnSuccess && client_address != NULL) {
+ 		uint64_t used = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);
+ 		for (uint32_t i = 0; i < s->planeCount; i++) {
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index 646ecc6..3f4a5b3 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -43,12 +43,13 @@ public:
+ 	uint32_t                  purgeable;    /* IOSurfaceSetPurgeable state */
+ 	uint32_t                  wrapDelta;    /* wrapped client memory: where it starts in its first page */
+ 	bool                      wrapped;      /* memory is a prepared range of a task (IOSurfaceWrapClient*) */
++	bool                      sharesParent; /* (0302) child surface: memory is the parent's (not counted, not completed) */
+ 	uint64_t                  scanoutPhys;  /* direct scanout pool slot (physical), or 0 */
+ 	int                       scanoutSlot;  /* pool slot, -1 when not from the pool */
+ 	char                      creator[17];  /* the creating process (0245: who holds the wired memory) */
+ 	int                       liveSlot;     /* index in sweet_surface_live, -1 when none */
+ 
+-	bool init() APPLE_KEXT_OVERRIDE { values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false; scanoutPhys = 0; scanoutSlot = -1; creator[0] = 0; liveSlot = -1; return OSObject::init(); }
++	bool init() APPLE_KEXT_OVERRIDE { values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false; sharesParent = false; scanoutPhys = 0; scanoutSlot = -1; creator[0] = 0; liveSlot = -1; return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
+ 
+ 	/* Kernel address of the pixels (mapped on first use), or 0. */
+-- 
+2.54.0 (Apple Git-157)
+

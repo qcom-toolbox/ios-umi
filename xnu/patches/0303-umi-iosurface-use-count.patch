@@ -1,0 +1,119 @@
+From edfa24c8c78bd91070475be126f2a736a7414e5c Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:00:55 +0100
+Subject: [PATCH] umi: IOSurface (0303): use-count traps 0/1 keep the state
+ page's use count (+0x18) that IOSurfaceIsInUse reads, per client view - every
+ surface looked unused, so CoreVideo pools reused buffers still in use (HEIC
+ tiles overwrote each other)
+
+---
+ iokit/Kernel/arm/SweetSurface.cpp | 55 ++++++++++++++++++++++++++++---
+ 1 file changed, 51 insertions(+), 4 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index d46206f..289d1b7 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -81,6 +81,7 @@ enum {
+ #define SWEET_SURFACE_TIMESTAMPS        0x800   /* offset in the state page */
+ #define SWEET_SURFACE_STATE_SEED        0xc     /* u32 in the state page */
+ #define SWEET_SURFACE_STATE_ACCEL       0x8     /* u16 accelerator id, u16 sub id */
++#define SWEET_SURFACE_STATE_USE         0x18    /* (0303) u64 use count: IOSurfaceIsInUse reads it */
+ #define SWEET_SURFACE_STATE_VSEED       0x20    /* u32 values seed */
+ #define SWEET_SURFACE_STATE_YCBCR       0x24    /* u32 */
+ #define SWEET_SURFACE_STATE_VSIZE       0x28    /* u32 room the values need when fetched, 0: none */
+@@ -544,8 +545,9 @@ public:
+ 	uint32_t      count;
+ 	bool          detached;     /* trap 4 seen: the framework is releasing this view */
+ 	bool          released;     /* released: only its state page stays mapped (fZombies) */
++	uint32_t      uses;         /* (0303) this client's use counts, given back when the view goes */
+ 
+-	bool init() APPLE_KEXT_OVERRIDE { detached = false; released = false; return OSObject::init(); }
++	bool init() APPLE_KEXT_OVERRIDE { detached = false; released = false; uses = 0; return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
+ };
+ 
+@@ -556,6 +558,11 @@ SweetSurfaceRef::free()
+ {
+ 	OSSafeReleaseNULL(data);
+ 	OSSafeReleaseNULL(state);
++	if (surface != NULL && uses != 0 && surface->state != NULL) {
++		OSAddAtomic64(-(SInt64)uses, (volatile SInt64 *)((uint8_t *)surface->state->getBytesNoCopy() +
++		    SWEET_SURFACE_STATE_USE));
++		uses = 0;
++	}
+ 	if (surface != NULL) {
+ 		if (!released) {
+ 			sweet_surface_put(surface);
+@@ -614,6 +621,8 @@ public:
+ 	IOExternalTrap *getTargetAndTrapForIndex(IOService **targetP, UInt32 index) APPLE_KEXT_OVERRIDE;
+ 
+ 	IOReturn trapUseCount(void *id, void *category, void *, void *, void *, void *);
++	IOReturn trapUseCountDown(void *id, void *category, void *, void *, void *, void *);
++	IOReturn useCountAdd(uint32_t id, int delta);
+ 	IOReturn trapLock(void *id, void *options, void *seedOut, void *, void *, void *);
+ 	IOReturn trapUnlock(void *id, void *options, void *seedOut, void *, void *, void *);
+ 	IOReturn trapRelease(void *id, void *, void *, void *, void *, void *);
+@@ -1492,10 +1501,48 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ }
+ 
+ IOReturn
+-IOSurfaceRootUserClient::trapUseCount(__unused void *id, __unused void *category,
++IOSurfaceRootUserClient::trapUseCount(void *id, __unused void *category,
+     void *, void *, void *, void *)
+ {
+-	return kIOReturnSuccess;
++	return useCountAdd((uint32_t)(uintptr_t)id, 1);
++}
++
++IOReturn
++IOSurfaceRootUserClient::trapUseCountDown(void *id, __unused void *category,
++    void *, void *, void *, void *)
++{
++	return useCountAdd((uint32_t)(uintptr_t)id, -1);
++}
++
++/*
++ * (0303) Traps 0/1 (IOSurfaceIncrementUseCount / Decrement, any category) keep the surface's use count in its
++ * state page (+0x18, u64), where IOSurfaceIsInUse reads it. They were ignored: every surface was "not in use",
++ * and CoreVideo pools handed out buffers still in use - CMPhoto's HEIC tiles overwrote each other (duplicated,
++ * misplaced, stale tiles that changed from decode to decode). Counted per client view too, so a client that
++ * goes away gives its counts back.
++ */
++IOReturn
++IOSurfaceRootUserClient::useCountAdd(uint32_t id, int delta)
++{
++	IOReturn ret = kIOReturnNotFound;
++	IOLockLock(fLock);
++	for (unsigned int i = 0; i < fRefs->getCount(); i++) {
++		SweetSurfaceRef *ref = (SweetSurfaceRef *)fRefs->getObject(i);
++		if (ref->surface == NULL || ref->surface->id != id || ref->surface->state == NULL) {
++			continue;
++		}
++		if (delta < 0 && ref->uses == 0) {
++			ret = kIOReturnUnderrun;
++			break;
++		}
++		ref->uses += delta;
++		OSAddAtomic64(delta, (volatile SInt64 *)((uint8_t *)ref->surface->state->getBytesNoCopy() +
++		    SWEET_SURFACE_STATE_USE));
++		ret = kIOReturnSuccess;
++		break;
++	}
++	IOLockUnlock(fLock);
++	return ret;
+ }
+ 
+ static IOReturn
+@@ -1641,7 +1688,7 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+ 
+ static IOExternalTrap sweet_surface_traps[] = {
+ 	[kSweetSurfaceTrapIncrementUse]  = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUseCount },
+-	[kSweetSurfaceTrapDecrementUse]  = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUseCount },
++	[kSweetSurfaceTrapDecrementUse]  = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUseCountDown },
+ 	[kSweetSurfaceTrapLock]          = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapLock },
+ 	[kSweetSurfaceTrapUnlock]        = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUnlock },
+ 	/*
+-- 
+2.54.0 (Apple Git-157)
+
