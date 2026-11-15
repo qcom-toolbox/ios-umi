@@ -298,6 +298,11 @@
     **`shim/out/umi-0312-gpu-clock.img`**, 0309's boot line): CP perf counter 0 = PERF_CP_ALWAYS_COUNT (core clocks),
     counter 1 = PERF_CP_BUSY_CYCLES; each sweettop round logs "core clock N MHz (counted), busy P % of its cycles". The
     clock count stops while the GPU's clocks are gated, so N is a floor when the GPU idles.
+    **Booted: core clock 489 MHz (= the 490 MHz asked, never gated)**; "busy" read 100 % even with 0 submits, so
+    counter 1's select probably did not take (counts every cycle) - not trusted.
+  - **0313** (patch `xnu/patches/0313-umi-gpu-upper-speeds.patch`, kernel 89cf992 on top of 0312): the GPU speed table
+    gets the phone's upper levels (live.dts gpu-opp-table_v2: 525 MHz @ 224, 587 @ 256, 670 @ 320), `sweetgpuspeed=4/5/6`.
+    Image **`shim/out/umi-0313-gpu587.img`** = 0309's boot line with sweetgpuspeed=5 (587 MHz). Not booted.
   - Open for GPU speed: is the core really at 490 MHz (GMU perf vote applied? read the GPU's own cycle counter against
     time), does Turnip render through GMEM or sysmem for backboardd's passes, and `TU_DEBUG=noubwc` (no UBWC) doubles
     the memory traffic of every render target.
