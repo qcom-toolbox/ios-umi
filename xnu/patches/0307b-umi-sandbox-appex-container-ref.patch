@@ -1,0 +1,40 @@
+From ad4cc569d27a18e033a04024bd1b70f59a768d15 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:53:06 +0100
+Subject: [PATCH] umi: Sandbox stand-in (0307b): release the proc_find
+ reference also when the pid is the caller's own - 0307 leaked it (launchd
+ asks for its own pid) and panicked in kern_proc.c:497 (unexpected non-zero
+ refcount)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/kern/sweet_amfi.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index fbb1af1..b524587 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -339,7 +339,9 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ 		if (arg == USER_ADDR_NULL || copyin(arg, a, sizeof(a)) != 0 || a[2] == 0 || a[3] == 0) {
+ 			return ENOENT;
+ 		}
+-		proc_t t = a[0] != 0 ? proc_find((int)a[0]) : p;
++		/* proc_find takes a reference even on the caller itself: released below whenever it was taken */
++		bool found = a[0] != 0;
++		proc_t t = found ? proc_find((int)a[0]) : p;
+ 		if (t == NULL) {
+ 			return ENOENT;
+ 		}
+@@ -356,7 +358,7 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ 			}
+ 			vnode_put(vp);
+ 		}
+-		if (t != p) {
++		if (found) {
+ 			proc_rele(t);
+ 		}
+ 		if (!appex) {
+-- 
+2.54.0 (Apple Git-157)
+

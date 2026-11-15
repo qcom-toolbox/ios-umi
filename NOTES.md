@@ -294,6 +294,10 @@
     answered ENOENT to everyone. **0307**: op 4 copies out "/private/var/mobile" when the target's executable path
     contains ".appex/" (proc_getexecutablevnode + vn_getpath); every other process still gets ENOENT.
   - FitnessWidget (SIGTRAP, its own code) is a different crash, not addressed.
+  - **0307 BOOTED - PANIC, do not use:** "Unexpected non zero ... refcount = 1 @kern_proc.c:497" right after
+    "Sandbox: launchd op 4": proc_find() takes a reference on the caller too, and 0307 released it only for other
+    processes. **0307b** (kernel ad4cc56, patch `0307b-umi-sandbox-appex-container-ref.patch`, image
+    **`shim/out/umi-0307b-appex-container.img`**, 0305's boot line): released whenever proc_find took it.
 
 - **2026-11-15 15:45: HEIC wallpaper heavy = CoreAnimation gain-map layers; picker previews black = refused read-only
   no-copy buffers** (phone files changed, user OK'd; kernel stays 0305).
