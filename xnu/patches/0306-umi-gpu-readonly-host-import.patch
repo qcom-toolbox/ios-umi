@@ -1,0 +1,136 @@
+From fa28c3418afb5d50302f7c8d831a4e7ca4ba6093 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:24:05 +0100
+Subject: [PATCH] umi: GPU (0306): read-only host imports - BoImport pins pages
+ that cannot be wired for writing (mapped image files, write-protected decoded
+ images) for reading and BoMap maps them without GPU write; every such
+ newBufferWithBytesNoCopy was refused (60+ per boot in backboardd and
+ PosterBoard)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_adreno.c           | 12 +++++++++++-
+ iokit/Kernel/arm/SweetAdreno.cpp | 33 +++++++++++++++++++++++++++++---
+ 2 files changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/bsd/dev/sweet_adreno.c b/bsd/dev/sweet_adreno.c
+index 16a5969..40fa1d7 100644
+--- a/bsd/dev/sweet_adreno.c
++++ b/bsd/dev/sweet_adreno.c
+@@ -3417,8 +3417,17 @@ sweet_adreno_maplog_lookup(uint64_t iova)
+ }
+ 
+ /* Map n physical pages (4K each) at iova, 4K at a time, as context 0's step-23 objects. */
++int sweet_adreno_map_at_ro(uint64_t iova, const uint64_t *pages, uint32_t n, int readonly);
+ int
+ sweet_adreno_map_at(uint64_t iova, const uint64_t *pages, uint32_t n)
++{
++	return sweet_adreno_map_at_ro(iova, pages, n, 0);
++}
++
++/* (0306) readonly: the pages are mapped without GPU write (a read-only host import: file-backed or
++ * otherwise write-protected client memory, which the GPU must never write) */
++int
++sweet_adreno_map_at_ro(uint64_t iova, const uint64_t *pages, uint32_t n, int readonly)
+ {
+ 	if (!sweet_adreno_service_ready() || (iova & 4095) || n == 0) {
+ 		return EINVAL;
+@@ -3454,7 +3463,8 @@ sweet_adreno_map_at(uint64_t iova, const uint64_t *pages, uint32_t n)
+ 	}
+ 	int err = 0;
+ 	for (uint32_t i = 0; i < n; i++) {
+-		if (!sa_space_map(&sa_core_space, iova + 4096ull * i, pages[i], PTE_CORE | (uint64_t)attr << 2)) {
++		if (!sa_space_map(&sa_core_space, iova + 4096ull * i, pages[i],
++		    PTE_CORE | (uint64_t)attr << 2 | (readonly ? PTE_READ_ONLY : 0))) {
+ 			err = ENOMEM;
+ 			break;
+ 		}
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 049cb66..81d74b7 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -49,6 +49,7 @@ extern "C" {
+ 	void sweet_adreno_window_free(uint64_t base);
+ 	uint32_t sweet_adreno_tables(uint32_t *max_tables);
+ 	int sweet_adreno_map_at(uint64_t iova, const uint64_t *pages, uint32_t n);
++	int sweet_adreno_map_at_ro(uint64_t iova, const uint64_t *pages, uint32_t n, int readonly);
+ 	void sweet_adreno_unmap_at(uint64_t iova, uint64_t len);
+ 	extern uint64_t sweet_adreno_bad_iova;
+ 	extern uint32_t sweet_adreno_bad_word;
+@@ -183,6 +184,7 @@ class SweetAdrenoUserClient : public IOUserClient {
+ 		uint64_t           bytes;
+ 		uint64_t           iova;        /* GPU address while mapped, else 0 */
+ 		bool               imported;    /* the client's own pages (no CPU-map token) */
++		bool               readOnly;    /* (0306) imported read-only: mapped without GPU write */
+ 		uint64_t           mapped_pa;   /* the page BoMap wrote for offset 0 (0197 diagnostics) */
+ 	};
+ 
+@@ -648,6 +650,7 @@ SweetAdrenoUserClient::v2NewSlot(IOMemoryDescriptor *md, IOMemoryMap *kmap, uint
+ 	fBO[i].bytes = bytes;
+ 	fBO[i].iova = 0;
+ 	fBO[i].imported = imported;
++	fBO[i].readOnly = false;
+ 	sa_stat_add(fStat, imported, (int64_t)bytes);  /* (0249) */
+ 	*handle = i + 1;
+ 	return kIOReturnSuccess;
+@@ -857,7 +860,28 @@ SweetAdrenoUserClient::v2Method(uint32_t method, const void *in, uint32_t inSize
+ 		    kIODirectionInOut, fTask);
+ 		if (md != NULL && md->prepare() != kIOReturnSuccess) {
+ 			md->release();
+-			md = NULL;                    /* read-only pages: nothing imports yet anyway */
++			md = NULL;
++		}
++		/*
++		 * (0306) Read-only pages (an image file mapped by ImageIO, a decoded image CoreAnimation or
++		 * PosterBoard keeps write-protected) cannot be wired for writing: every such
++		 * newBufferWithBytesNoCopy was refused ("HostMemory NotRepresentable", 60+ per boot in
++		 * backboardd and PosterBoard), and those images took slower paths or were missing.
++		 * They are pinned for reading and mapped without GPU write.
++		 */
++		bool readOnly = false;
++		if (md == NULL) {
++			md = IOMemoryDescriptor::withAddressRange(rq->address, rq->bytes, kIODirectionOut, fTask);
++			if (md != NULL && md->prepare() != kIOReturnSuccess) {
++				md->release();
++				md = NULL;
++			}
++			readOnly = md != NULL;
++			static uint32_t told;
++			if (told++ < 8) {
++				IOLog("SWEET ADRENO: BoImport %#llx (%llu bytes): read-only pages -> %s\n", rq->address,
++				    rq->bytes, readOnly ? "imported read-only" : "refused");
++			}
+ 		}
+ 		if (md == NULL) {
+ 			return kIOReturnBadArgument;
+@@ -867,7 +891,7 @@ SweetAdrenoUserClient::v2Method(uint32_t method, const void *in, uint32_t inSize
+ 		 * the surface over) are out in memory before the GPU samples it - the import is the
+ 		 * IOSurface textures CoreAnimation composites, and without this the GPU reads stale
+ 		 * memory for every surface the CPU wrote (glitched columns). */
+-		IOMemoryMap *kmap = md->map();
++		IOMemoryMap *kmap = md->map(readOnly ? kIOMapReadOnly : 0);
+ 		if (kmap == NULL) {
+ 			md->complete();
+ 			md->release();
+@@ -875,6 +899,9 @@ SweetAdrenoUserClient::v2Method(uint32_t method, const void *in, uint32_t inSize
+ 		}
+ 		uint64_t h = 0;
+ 		IOReturn r = v2NewSlot(md, kmap, rq->bytes, true, &h);
++		if (r == kIOReturnSuccess) {
++			fBO[h - 1].readOnly = readOnly;
++		}
+ 		if (r != kIOReturnSuccess) {
+ 			kmap->release();
+ 			md->complete();
+@@ -927,7 +954,7 @@ SweetAdrenoUserClient::v2Method(uint32_t method, const void *in, uint32_t inSize
+ 				}
+ 				fPageBuf[n] = pa;
+ 			}
+-			int mr = r == kIOReturnSuccess ? sweet_adreno_map_at(rq->iova + start, fPageBuf, n) : 0;
++			int mr = r == kIOReturnSuccess ? sweet_adreno_map_at_ro(rq->iova + start, fPageBuf, n, bo->readOnly) : 0;
+ 			if (mr == EEXIST) {
+ 				IOLog("SWEET ADRENO: BoMap refused: handle %llu iova %#llx+%#llx overlaps a mapped range\n",
+ 				    rq->handle, rq->iova, bo->bytes);
+-- 
+2.54.0 (Apple Git-157)
+

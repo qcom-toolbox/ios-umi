@@ -283,6 +283,17 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 15:25: 0305 booted: Photos grid fine (user); HEIC wallpaper fine once set, picker slow / flickering /
+  blocks; 0306 = read-only GPU host imports** (patch `xnu/patches/0306-umi-gpu-readonly-host-import.patch`, kernel
+  fa28c34 on top of 0305, image **`shim/out/umi-0306-ro-import.img`** = 0305's boot line, built, not booted).
+  - With CA_DISABLE_DETACHED every swap on the 0305 boot was one layer (875 of 877 direct).
+  - Every boot, backboardd and PosterBoard hit 60+ `no-copy buffer refused: HostMemory NotRepresentable` (the log stops
+    at 64 lines per process, so other errors after them were never seen). Cause: SweetAdreno BoImport prepared the
+    client's range kIODirectionInOut, which fails for pages that cannot be wired for writing (mapped image files,
+    write-protected decoded images) -> kIOReturnBadArgument -> Turnip VK_ERROR_INVALID_EXTERNAL_HANDLE. 0306 retries
+    kIODirectionOut, maps the kernel view kIOMapReadOnly and BoMap maps the BO with PTE_READ_ONLY
+    (sweet_adreno_map_at_ro). Logs "SWEET ADRENO: BoImport ... read-only pages -> imported read-only" (8 times).
+
 - **2026-11-15 15:20: Photos grid / HEIC wallpaper / App Library glitch = display path, not GPU; CA_DISABLE_DETACHED
   + framebuffer bounce present (0305)** (patch `xnu/patches/0305-umi-fb-bounce-present.patch`, kernel d5313ca on top
   of 0304, image **`shim/out/umi-0305-fb-bounce.img`** = 0304's boot line exactly, built, not booted).
