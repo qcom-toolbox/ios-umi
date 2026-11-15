@@ -283,6 +283,41 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 22:50: HEAT - the CPU caps come from the SoC, the X55 link never slept; 0314 lets it enter L1**
+  (patch `xnu/patches/0314-umi-x55-pcie-aspm-l1.patch`, kernel 3d35e09 on top of 0313, images
+  **`shim/out/umi-0314-pcie-l1.img`** = 0313's boot line (sweetgpuspeed=5), and `shim/out/umi-0314-pcie-l1ss.img` =
+  the same + `sweetmdmaspm=2`, sweettop=10 dropped for the 607-char limit; built, not booted).
+  - What the 0313 log says (UDP live log, session 3034b72e `umi-0295-live.log`, 21 boots compared):
+    - The "hot: capped" lines are driven by the SoC's own TSENS core sensors (sweet_cpufreq.c, limit 75 C, silver
+      only at 80); the modem's thermistors play no part. The cores sit at 67-70 C with the CPUs 0-10 % busy; the
+      caps drop to their floor (silver 787, gold 1382 MHz) once a core passed 80 C and climb back only a step per
+      256 ms below 70 C, so on a warm phone they stay at the floor.
+    - PA_THERM / PA_THERM1 / XO_THERM are read **once, when the modem boots** (VAdcLog.c), before it transmits:
+      PA_THERM1 36-38 C on a cold boot, 55-60 C on a boot of an already warm phone. They follow the board's
+      temperature, so the 55 C reading does not show the radio heating anything.
+    - The radio itself is calm: registered on Sunrise LTE at -89 dBm (good signal), cs/ps attached, no search or
+      registration loop, no data-call or IMS loop (one WDS session, NAS / DMS / UIM polled once a minute), light
+      data (~2000 packets out in 13 min, then none). Macrosleep (connected-mode DRX) lines only during the session
+      setup.
+  - What was wrong on our side: **the PCIe2 link to the X55 never left L0** (gen 3 x2, both PHYs at full power):
+    the bring-up set PARF_PM_CTRL bit 5 (REQ_NOT_ENTR_L1) and no ASPM was on, so neither the SoC's PCIe2 PHY nor
+    the X55 (whose own sleep needs an idle link) could rest between packets. The phone's own kernel runs this link
+    with L1 + L1 substates (live FDT pcie2: only `qcom,no-l0s-supported`; also `qcom,drv-supported`). And the
+    mission loop woke 500 times a second (md_wait(2)) for good.
+  - 0314: `sweetmdmaspm=` 0 = as before, **1 (default) = ASPM L1**: REQ_NOT_ENTR_L1 cleared (as Linux pcie-qcom
+    2.7.0), LNKCTL ASPM L1 on the root port, then the X55 (each side's PCIe capability found by walking the list;
+    only if both LNKCAPs offer L1); 2 = + the L1 substates both sides' L1SS capabilities offer, LTR on (as pci-msm
+    msm_pcie_config_l1ss; CLKREQ# GPIO 86 is already muxed to pci_e2). Logged once: "ASPM: root port cap ...",
+    "ASPM: L1 on: ...". The LTSSM (ELBI_SYS_STTS, a local register: reading it does not wake the link) is
+    sampled every loop pass and printed before the minute's status line: "SWEET MDM: link: N% L1, M% L0, ...".
+    Mission loop: after a second with nothing new on the rings / QMI / output queue it polls every
+    `sweetmdmidle` ms (default 20; 2 = old behaviour); pd_output wakes it at once (thread_wakeup on md.chan).
+  - To check on the phone: "link: ..% L1" high at idle, data still works (Safari over LTE, Wi-Fi off), the
+    cores' temperature in the CPUFREQ lines (the UDP log often cuts those long lines: read the "hottest core" part)
+    after 15-20 min idle against 0313's 67-70 C. Honest expectation: the link and X55 sleep save some hundreds of mW
+    at most; if the cores stay at 67-70 C the main heat is elsewhere on the SoC (GPU clock never gated at 587 MHz,
+    0311's DDR / LLCC vote held at the maximum, no CPU power collapse), not the radio.
+
 - **2026-11-15 21:50: GPU performance - 0311 votes memory bandwidth** (patch `xnu/patches/0311-umi-gpu-ddr-bandwidth-vote.patch`,
   kernel d18ca84 on top of 0310, image **`shim/out/umi-0311-ddr-vote.img`** = 0309's boot line, built, not booted).
   - backboardd's GPU time is ~20-40 ms per frame for plain compositing (an Adreno 650 at 490 MHz should need ~1-2 ms).

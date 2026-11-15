@@ -1,0 +1,201 @@
+From 3d35e091a89e099973a4e0da53b91a6e5653ec23 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 22:47:37 +0100
+Subject: [PATCH] umi: modem (0314): PCIe2 link power management - ASPM L1 on
+ the X55 link (REQ_NOT_ENTR_L1 was set, the link sat in L0 for good), L1
+ substates opt-in (sweetmdmaspm=2), L1 residency sampled from the LTSSM; the
+ mission loop polls every 20 ms after a quiet second (was 2 ms), woken by
+ pd_output
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_mdm.c | 130 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 129 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/sweet_mdm.c b/bsd/dev/sweet_mdm.c
+index 637c4b5..7a00d51 100644
+--- a/bsd/dev/sweet_mdm.c
++++ b/bsd/dev/sweet_mdm.c
+@@ -559,6 +559,114 @@ md_msi(uint32_t addr, uint32_t data)
+ 	printf("SWEET MDM: no MSI capability\n");
+ }
+ 
++/*
++ * 0314: link power management on PCIe2. Until now the link stayed in L0 (gen 3 x2, both PHYs at full power)
++ * for good: PARF_PM_CTRL bit 5 (REQ_NOT_ENTR_L1) was set and neither side's ASPM was on, so neither the
++ * SoC's PCIe2 PHY nor the X55 (whose own sleep needs the link idle) could rest between packets. The phone's
++ * own kernel (msm-4.19 pci-msm, live FDT pcie2: only qcom,no-l0s-supported) runs this link with L1 and L1
++ * substates. sweetmdmaspm=0 leaves the link as before; 1 (default) = ASPM L1 (REQ_NOT_ENTR_L1 cleared as
++ * Linux pcie-qcom 2.7.0, LNKCTL ASPM L1 on the root port, then on the X55); 2 = L1 + the L1 substates
++ * both sides offer (L1SS control 1 enable bits, LTR on), as pci-msm msm_pcie_config_l1ss. CLKREQ# (GPIO 86) is
++ * already muxed to pci_e2. The LTSSM is sampled every poll of the mission loop (a local register: reading
++ * it does not wake the link) and the share of samples in L1 printed with the minute's status line.
++ */
++#define PARF_PM_STTS         0x024u
++#define LTSSM_L0             0x11u
++#define LTSSM_L1_IDLE        0x14u
++static unsigned md_aspm_level = 1;
++static struct {
++	uint32_t samples, l0, l1, other;
++} mdl;
++
++static uint32_t
++md_cap(vm_offset_t base, unsigned id)
++{
++	uint32_t ptr = md_rd(base, 0x34) & 0xfcu;
++	for (unsigned guard = 0; ptr >= 0x40u && guard < 48; ++guard) {
++		uint32_t hdr = md_rd(base, ptr);
++		if ((hdr & 0xffu) == id) {
++			return ptr;
++		}
++		ptr = (hdr >> 8) & 0xfcu;
++	}
++	return 0;
++}
++
++static uint32_t
++md_ecap(vm_offset_t base, unsigned id)
++{
++	uint32_t ptr = 0x100u;
++	for (unsigned guard = 0; ptr >= 0x100u && ptr < 0x1000u && guard < 64; ++guard) {
++		uint32_t hdr = md_rd(base, ptr);
++		if (hdr == 0 || hdr == 0xffffffffu) {
++			return 0;
++		}
++		if ((hdr & 0xffffu) == id) {
++			return ptr;
++		}
++		ptr = (hdr >> 20) & 0xffcu;
++	}
++	return 0;
++}
++
++static void
++md_aspm(void)
++{
++	(void)PE_parse_boot_argn("sweetmdmaspm", &md_aspm_level, sizeof(md_aspm_level));
++	bzero(&mdl, sizeof(mdl));
++	uint32_t rc = md_cap(md.dbi, 0x10), ep = md_cap(md.conf, 0x10);
++	if (rc == 0 || ep == 0) {
++		printf("SWEET MDM: ASPM: no PCIe capability (root port %#x, X55 %#x): link left in L0\n", rc, ep);
++		return;
++	}
++	uint32_t rccap = md_rd(md.dbi, rc + 0x0c), epcap = md_rd(md.conf, ep + 0x0c);
++	printf("SWEET MDM: ASPM: root port cap %#x lnkcap %#x lnkctl %#x, X55 cap %#x lnkcap %#x lnkctl %#x, "
++	    "parf pm ctrl %#x stts %#x (sweetmdmaspm=%u)\n", rc, rccap, md_rd(md.dbi, rc + 0x10) & 0xffffu, ep, epcap,
++	    md_rd(md.conf, ep + 0x10) & 0xffffu, md_rd(md.parf, PARF_PM_CTRL), md_rd(md.parf, PARF_PM_STTS),
++	    md_aspm_level);
++	if (md_aspm_level == 0) {
++		return;
++	}
++	if (!(rccap & epcap & (1u << 11))) {
++		printf("SWEET MDM: ASPM: L1 not offered by both sides: link left in L0\n");
++		return;
++	}
++	if (md_aspm_level >= 2) {
++		uint32_t rl = md_ecap(md.dbi, 0x1e), el = md_ecap(md.conf, 0x1e);
++		uint32_t rss = rl ? md_rd(md.dbi, rl + 4) : 0, ess = el ? md_rd(md.conf, el + 4) : 0;
++		uint32_t both = rss & ess & 0xfu;
++		printf("SWEET MDM: ASPM: L1SS root port %#x caps %#x, X55 %#x caps %#x -> enabling %#x\n", rl, rss, el,
++		    ess, both);
++		if (both != 0) {
++			if ((md_rd(md.dbi, rc + 0x24) & md_rd(md.conf, ep + 0x24)) & (1u << 11)) {
++				md_wr(md.dbi, rc + 0x28, md_rd(md.dbi, rc + 0x28) | (1u << 10));       /* DEVCTL2 LTR */
++				md_wr(md.conf, ep + 0x28, md_rd(md.conf, ep + 0x28) | (1u << 10));
++			}
++			md_wr(md.dbi, rl + 8, (md_rd(md.dbi, rl + 8) & ~0xfu) | both);
++			md_wr(md.conf, el + 8, (md_rd(md.conf, el + 8) & ~0xfu) | both);
++		}
++	}
++	md_wr(md.parf, PARF_PM_CTRL, md_rd(md.parf, PARF_PM_CTRL) & ~(1u << 5));       /* REQ_NOT_ENTR_L1 off */
++	md_wr(md.dbi, rc + 0x10, (md_rd(md.dbi, rc + 0x10) & ~3u) | 2u);               /* upstream first */
++	md_wr(md.conf, ep + 0x10, (md_rd(md.conf, ep + 0x10) & ~3u) | 2u);
++	printf("SWEET MDM: ASPM: L1 on: root port lnkctl %#x, X55 lnkctl %#x, parf pm ctrl %#x\n",
++	    md_rd(md.dbi, rc + 0x10) & 0xffffu, md_rd(md.conf, ep + 0x10) & 0xffffu, md_rd(md.parf, PARF_PM_CTRL));
++}
++
++static void
++md_link_sample(void)
++{
++	uint32_t lt = (md_rd(md.dbi, ELBI_SYS_STTS) >> 12) & 0x3fu;
++	mdl.samples++;
++	if (lt == LTSSM_L0) {
++		mdl.l0++;
++	} else if (lt == LTSSM_L1_IDLE) {
++		mdl.l1++;
++	} else {
++		mdl.other++;
++	}
++}
++
+ static int
+ md_sbl1(void)
+ {
+@@ -2892,6 +3000,7 @@ pd_output(ifnet_t ifp, mbuf_t m)
+ 	pd.q[(pd.head + pd.count) % PD_Q] = m;
+ 	pd.count++;
+ 	lck_mtx_unlock(pd.lock);
++	thread_wakeup(&md.chan);                /* 0314: the modem thread may be in its idle poll */
+ 	return 0;
+ }
+ 
+@@ -3749,6 +3858,7 @@ md_mission(void)
+ 		printf("SWEET MDM: same session: ee %u, mhistatus %#x, ctrl %#x\n", mx.ee, md_rd(md.bar0, MHI_STATUS),
+ 		    md_rd(md.bar0, MHI_CTRL));
+ 	}
++	md_aspm();
+ 	/* LOOPBACK: 16 bytes out on 0, one buffer in on 1 */
+ 	if (mx_chan_start(0, false, MH_TRE_LB_OUT) == 0 && mx_chan_start(1, true, MH_TRE_LB_IN) == 0) {
+ 		memcpy((void *)(mx.mem + MH_LBBUF), "sweet umi ping!!", 16);
+@@ -3799,6 +3909,9 @@ md_mission(void)
+ 	bool printed_sfr = false;
+ 	uint64_t t0 = mach_absolute_time();
+ 	unsigned next_status = 10000, status_every = md.stage >= 9 ? 60000 : 10000;
++	unsigned idle_ms = 20, quiet_since = 0;
++	(void)PE_parse_boot_argn("sweetmdmidle", &idle_ms, sizeof(idle_ms));
++	uint32_t act_prev[6] = { 0 };
+ 	for (unsigned t = 0; (secs == 0 || t < secs * 1000u) && !mx.gone && !(mq.restart_wanted && maxr0);) {
+ 		uint64_t ns;
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+@@ -3807,6 +3920,7 @@ md_mission(void)
+ 			printed_sfr = true;
+ 			mx_sfr_print("shutting down");
+ 		}
++		md_link_sample();
+ 		mx_er0();
+ 		mx_er1();
+ 		while (mx_rxq_head != mx_rxq_tail) {
+@@ -3820,6 +3934,11 @@ md_mission(void)
+ 		}
+ 		if (t >= next_status) {
+ 			next_status = t + status_every;
++			unsigned l1 = mdl.samples ? (unsigned)((uint64_t)mdl.l1 * 100 / mdl.samples) : 0;
++			unsigned l0 = mdl.samples ? (unsigned)((uint64_t)mdl.l0 * 100 / mdl.samples) : 0;
++			printf("SWEET MDM: link: %u%% L1, %u%% L0, %u other of %u samples (aspm %u, idle poll %u ms)\n", l1, l0,
++			    mdl.other, mdl.samples, md_aspm_level, idle_ms);
++			bzero(&mdl, sizeof(mdl));
+ 			printf("SWEET MDM: QRTR %u s: %u hellos, %u services, %u data; mhistatus %#x mdm2ap status %u errfatal %u; %s\n",
+ 			    t / 1000, mq.hellos, mq.servers, mq.data, md_rd(md.bar0, MHI_STATUS), md_gpio_in(MDM2AP_STATUS),
+ 			    md_gpio_in(MDM2AP_ERRFATAL), sweet_cell);
+@@ -3827,8 +3946,17 @@ md_mission(void)
+ 				mx.gone = true;
+ 			}
+ 		}
++		/*
++		 * 0314: anything new on the rings or the output queue? A second without anything -> poll every
++		 * sweetmdmidle ms (default 20; 2 = the old 500 wake-ups a second); pd_output wakes the thread at once.
++		 */
++		uint32_t act[6] = { mx.er0_rp, mx.er1_rp, mxd.er7_rp, mxd.er8_rp, mq.answers, pd.count };
++		if (memcmp(act, act_prev, sizeof(act)) != 0) {
++			memcpy(act_prev, act, sizeof(act));
++			quiet_since = t;
++		}
+ 		if (md.stage >= 9 && t > 60000) {
+-			md_wait(2);                     /* service mode: sleep between polls (the first minute polls hard) */
++			md_wait(t - quiet_since >= 1000 && idle_ms > 2 ? idle_ms : 2);  /* service mode: sleep between polls */
+ 		} else {
+ 			delay(1000);
+ 		}
+-- 
+2.54.0 (Apple Git-157)
+

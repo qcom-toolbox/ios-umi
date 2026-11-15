@@ -12,7 +12,7 @@
 | Feature | Notes | Status |
 |---|---|---|
 | 🥾 Boot | Stock bootloader → `fastboot boot` of our shim → XNU | ✅ |
-| 🧠 CPU | All 8 cores; clocks follow the load (EPSS governor, 75 °C limit) | ✅ |
+| 🧠 CPU | All 8 cores; clocks follow the load (EPSS governor, 75 °C limit). The SoC idles at 67-70 °C, so the clocks often stay capped (silver 787, gold 1382 MHz); the modem's radio is not the cause (it is calm), see NOTES 2026-11-15 22:50 | ⚠️ |
 | 🧮 RAM | 6 GB of the 8 GB for iOS (0x100000000-0x280000000). 6.66 GB (from 0xd6000000) booted but the persistent log stopped writing, so it is off for now | ✅ |
 | 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write; the root volume was grown online from 16 to 32 GiB (2026-11-14) | ✅ |
 | 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
@@ -29,7 +29,7 @@
 | 🔊 Audio | Speaker works (ringtones, system sounds); no microphones, earpiece not used | ⚠️ |
 | 🛜 WiFi | 2.4 GHz + 5 GHz, open + WPA2-PSK, HT/VHT rates, Block Ack; **270 Mbit/s down on fast.com at 5 GHz**, kernel meter 168 Mbit/s mean / 330 Mbit/s best second (80 MHz, 2 streams; kernel 0286; 0284 was too slow to run a speed test). Joins the saved network by itself after a reboot (0290, user) and after Wi-Fi off / on. Rejoin after a lost link, hidden networks, dual-band names and sleep still to test; no WPA3 | ⚠️ |
 | 🦷 Bluetooth | QCA6390 over UART (921600 baud): scan, connect and pair in Settings, Control Center button, off / on (slow); see the tests below | ⚠️ |
-| 📶 Cellular Data | Snapdragon X55 brought up by the kernel (`sweetmdm=10 sweetmdmonline=1`): SIM, LTE registration on Sunrise, a new network search after 3 min without service; status bar shows **Sunrise, signal bars and LTE**; **mobile data works** (Safari over LTE with Wi-Fi off) through the kernel's `pdp_ip0` and `sweet-telephonyd` (the CommCenter stand-in, publishes the service to configd); the session survives a short loss of signal; **Control Center's cellular data button works**. IPv4 only (Sunrise has no IPv6). Not done: Settings > Cellular is incomplete (PIN, SIM lock, carrier settings, data usage, manual network selection); the switch stopping data in the kernel (0280) is untested; calls and SMS not planned | ✅ |
+| 📶 Cellular Data | Snapdragon X55 brought up by the kernel (`sweetmdm=10 sweetmdmonline=1`): SIM, LTE registration on Sunrise, a new network search after 3 min without service; status bar shows **Sunrise, signal bars and LTE**; **mobile data works** (Safari over LTE with Wi-Fi off) through the kernel's `pdp_ip0` and `sweet-telephonyd` (the CommCenter stand-in, publishes the service to configd); the session survives a short loss of signal; **Control Center's cellular data button works**. IPv4 only (Sunrise has no IPv6). Not done: Settings > Cellular is incomplete (PIN, SIM lock, carrier settings, data usage, manual network selection); the switch stopping data in the kernel (0280) is untested; calls and SMS not planned. Power: the X55's PCIe link never left full power until kernel 0314 (ASPM L1, built, not booted yet) | ✅ |
 | 📍 Location | Works through Wi-Fi positioning (Weather shows the city, Maps asks for permission) | ✅ |
 | 🛰️ GPS | No GPS receiver driver yet; location comes from Wi-Fi | ❌ |
 | 🪵 USB | Device mode (USB Ethernet + kernel log) for development; no host / iTunes | ⚠️ |
