@@ -291,6 +291,12 @@
   - 0311: sweet_rpmh_bcm_vote also takes MC0 (DDR), SH0 (system cache, LLCC) and ACV (DDR active, sm8250 enable mask
     0x8); after "SWEET GPU: done" the GPU votes ACV 0x8 and MC0 / SH0 0x3fff (max) and logs "memory bandwidth voted
     (ACV e, MC0 e, SH0 e) (0311)". `sweetddr=0` = no vote. Costs power / heat while it holds.
+  - **0311 booted: votes accepted (ACV 0x8 at 0x5007c, MC0 0x3fff at 0x50000, SH0), but no gain:** GPU wait still ~31 ms
+    mean per frame, kernel submit overhead only a few ms (walk 1-3 ms, cleans 5-11 ms per 10 s). DDR bandwidth is not
+    what limits the GPU. Daily image stays `umi-0310.img` (0311 costs power for nothing measured).
+  - Open for GPU speed: is the core really at 490 MHz (GMU perf vote applied? read the GPU's own cycle counter against
+    time), does Turnip render through GMEM or sysmem for backboardd's passes, and `TU_DEBUG=noubwc` (no UBWC) doubles
+    the memory traffic of every render target.
 
 - **2026-11-15 20:10: 0308 - drawables held until the panel latched the flip** (patch
   `xnu/patches/0308-umi-fb-latch-wait.patch`, kernel 0b94d58 on top of 0307b, image
