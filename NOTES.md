@@ -283,6 +283,17 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 20:10: 0308 - drawables held until the panel latched the flip** (patch
+  `xnu/patches/0308-umi-fb-latch-wait.patch`, kernel 0b94d58 on top of 0307b, image
+  **`shim/out/umi-0308-latch-wait.img`** = 0307b's boot line, built, not booted).
+  - User, describing the glitch: "flickering, and when flickering showing part of an old frame inside the new frame, or
+    just the status bar flickering". With 15-23 % of releases happening while the CTL flush bits were still set (the
+    panel still fetching that surface), CoreAnimation drew into the surface on the panel.
+  - 0308: while the flip is pending, nothing is released (retire-queue drops and the "two flips in one tick" drop go to a
+    wait list of up to 16); the list is let go when the bits clear, or after 60 ticks (1 s). Logged on the
+    "drawables released" line: "N held until the flip latched, M released after 1 s or overflow".
+    `sweetfb_latchwait=0` = old behaviour.
+
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
   - backboardd env `CA_COLOR_FLUSH=1` for one boot: the UI had "0 glitch" (user), at ~8.6 fps and 18 ms GPU wait like

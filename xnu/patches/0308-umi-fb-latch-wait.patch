@@ -1,0 +1,141 @@
+From 0b94d585e7542d42cfcef3fd05891be1761e00e8 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 20:07:13 +0100
+Subject: [PATCH] umi: framebuffer (0308): release replaced drawables only once
+ the CTL latched the flip - the command-mode panel kept fetching a surface
+ CoreAnimation was already drawing its next frame into (old frame parts inside
+ the new one, status bar flicker); held up to 1 s, sweetfb_latchwait=0 = old
+ timer-only release
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 76 +++++++++++++++++++++++++--
+ 1 file changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index b1ba007..dfdb313 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -169,6 +169,11 @@ public:
+ 	 * reading the old surface until that frame ends */
+ #define SWEET_FB_RETIRE_MAX 6
+ 	SweetSurface *fRetireQ[SWEET_FB_RETIRE_MAX][SWEET_FB_LAYERS];
++	/* (0308) surfaces due for release while the CTL still had the flip pending: the panel may still fetch them */
++#define SWEET_FB_WAIT_MAX 16
++	SweetSurface *fRetireWait[SWEET_FB_WAIT_MAX];
++	uint32_t      fRetireWaitCount, fRetireWaitTicks;
++	uint64_t      fRetireDeferred, fRetireForced;
+ 	uint32_t      fRetireTicks;
+ 	uint64_t      fRetireDrops, fRetirePending;
+ 	uint64_t      fGpuHoldUntil;  /* sweet_fb_gpu_begin(): no frames shown before then (mach time), boot framebuffer scanned */
+@@ -246,6 +251,7 @@ static void sweet_color_matrix(uint64_t which, const uint8_t *in, uint32_t len);
+ static void sweet_color_block(const uint64_t *scalars, uint32_t count, const uint8_t *in, uint32_t len);
+ static void sweet_hold(SweetSurface *s, bool on);
+ static void sweet_hold_drop(SweetSurface **set);
++static int sweet_fb_latchwait = -1;    /* (0308) sweetfb_latchwait=0: release on the timer alone, as before */
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+@@ -514,16 +520,68 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		memcpy(fb->fRetireQ[q], fb->fRetireQ[q - 1], sizeof(retire));
+ 	}
+ 	bzero(fb->fRetireQ[0], sizeof(fb->fRetireQ[0]));
++	/*
++	 * (0308) The command-mode panel keeps fetching the old surface until the CTL latches the flip (its flush bits
++	 * clear); here that often took longer than the retire delay (23 % of releases at 3 ticks, still 15 % at 6), and
++	 * CoreAnimation drew its next frame into the surface still on the panel: parts of an old frame inside the new
++	 * one, a flickering status bar. While the flip is pending nothing is released: surfaces due go to a wait list,
++	 * which is let go once the bits clear (the panel then fetches the newest frame) or after 60 ticks (1 s).
++	 */
++	if (sweet_fb_latchwait < 0) {
++		int v = 1;
++		PE_parse_boot_argn("sweetfb_latchwait", &v, sizeof(v));
++		sweet_fb_latchwait = v != 0;
++	}
++	bool pendingFlip = fb->fCtl != NULL && (fb->fCtl[0x18 / 4] & fb->fFlushBits) != 0;
++	SweetSurface *waitDrop[SWEET_FB_WAIT_MAX] = {};
++	uint32_t waitDropCount = 0;
+ 	for (uint32_t i = 0; i < SWEET_FB_LAYERS; i++) {
+ 		if (retire[i] != NULL) {
+ 			fb->fRetireDrops++;
+-			if (fb->fCtl != NULL && (fb->fCtl[0x18 / 4] & fb->fFlushBits) != 0) {
++			if (pendingFlip) {
+ 				fb->fRetirePending++;   /* the CTL flush bits still set: is the flip latched? */
+ 			}
+ 		}
+ 	}
++	if (sweet_fb_latchwait) {
++		if (pendingFlip) {
++			for (uint32_t i = 0; i < SWEET_FB_LAYERS; i++) {
++				if (retire[i] == NULL) {
++					continue;
++				}
++				if (fb->fRetireWaitCount == SWEET_FB_WAIT_MAX) {       /* full: the oldest goes */
++					waitDrop[waitDropCount++] = fb->fRetireWait[0];
++					memmove(&fb->fRetireWait[0], &fb->fRetireWait[1], sizeof(fb->fRetireWait[0]) * (SWEET_FB_WAIT_MAX - 1));
++					fb->fRetireWaitCount--;
++					fb->fRetireForced++;
++				}
++				fb->fRetireWait[fb->fRetireWaitCount++] = retire[i];
++				retire[i] = NULL;
++				fb->fRetireDeferred++;
++			}
++		}
++		if (fb->fRetireWaitCount != 0) {
++			fb->fRetireWaitTicks++;
++			if (!pendingFlip || fb->fRetireWaitTicks >= 60) {
++				if (pendingFlip) {
++					fb->fRetireForced += fb->fRetireWaitCount;
++				}
++				for (uint32_t k = 0; k < fb->fRetireWaitCount; k++) {
++					waitDrop[waitDropCount++] = fb->fRetireWait[k];
++					fb->fRetireWait[k] = NULL;
++				}
++				fb->fRetireWaitCount = 0;
++				fb->fRetireWaitTicks = 0;
++			}
++		}
++	}
+ 	IOLockUnlock(fb->fLock);
+ 	sweet_hold_drop(retire);
++	for (uint32_t k = 0; k < waitDropCount; k++) {
++		SweetSurface *one[SWEET_FB_LAYERS] = {};
++		one[0] = waitDrop[k];
++		sweet_hold_drop(one);
++	}
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+@@ -537,9 +595,16 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 				SweetSurface *one[SWEET_FB_LAYERS] = {};
+ 				one[i] = fb->fRetireQ[0][i];
+ 				fb->fRetireQ[0][i] = NULL;
+-				IOLockUnlock(fb->fLock);
+-				sweet_hold_drop(one);   /* two flips within one tick: the older one is long off the panel */
+-				IOLockLock(fb->fLock);
++				/* (0308) two flips within one tick: the older one is off the panel only once a flip latched */
++				if (sweet_fb_latchwait > 0 && fb->fCtl != NULL && (fb->fCtl[0x18 / 4] & fb->fFlushBits) != 0 &&
++				    fb->fRetireWaitCount < SWEET_FB_WAIT_MAX) {
++					fb->fRetireWait[fb->fRetireWaitCount++] = one[i];
++					fb->fRetireDeferred++;
++				} else {
++					IOLockUnlock(fb->fLock);
++					sweet_hold_drop(one);
++					IOLockLock(fb->fLock);
++				}
+ 			}
+ 			fb->fRetireQ[0][i] = fb->fShowHold[i];
+ 		}
+@@ -548,7 +613,8 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	if ((count % 600) == 0 && fb->fRetireDrops != 0) {
+ 		IOLog("SWEET FB: %llu drawables released %u vsyncs after their replacement, %llu with the CTL flush bits "
+-		    "still set\n", fb->fRetireDrops, fb->fRetireTicks, fb->fRetirePending);
++		    "still set; %llu held until the flip latched, %llu released after 1 s or overflow (0308)\n",
++		    fb->fRetireDrops, fb->fRetireTicks, fb->fRetirePending, fb->fRetireDeferred, fb->fRetireForced);
+ 	}
+ 	if ((count % 600) == 0) {
+ 		sweet_fb_path_stats();
+-- 
+2.54.0 (Apple Git-157)
+
