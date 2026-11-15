@@ -297,6 +297,9 @@
     held until the latch, none forced. Remaining: the idle home screen redraws at a steady 10.0 fps (~21 ms GPU each);
     under CA_COLOR_FLUSH the only area flashing there was a small square at the top left of the status bar. Asked the
     status-bar session whether its change updates at 10 Hz.
+  - Status-bar session: libsweet-sb has no timer / animation. Test (user OK'd): `/usr/local/etc/sweet-sb.txt` = "0 0 2"
+    (library a no-op) on a 0309 boot: idle home screen still ~10 fps redraw (~20 ms GPU), still flickering -> not the
+    cause; the file was removed again (directory /usr/local/etc stays, empty). 0308 held 69 drawables on that boot.
 
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
