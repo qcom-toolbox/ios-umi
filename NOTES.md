@@ -311,6 +311,8 @@
     10-30 fps against a 60 Hz rhythm. Images: `shim/out/umi-0310.img` (0309's boot line, 60 Hz),
     `shim/out/umi-0310-vhz30.img` (+ sweetfb_vhz=30, sweettop=10 dropped for the 607-char limit). Test: Reduce
     Transparency off, widget page / App Library / status bar.
+    **vhz30 booted: still glitchy** (user); frames came at 30 Hz steps (172 of 350 gaps 20-36 ms, none under 20), so the
+    setting took effect. The 60 Hz rhythm vs 10-30 fps rendering is not the blur bug. Daily image: `umi-0310.img`.
 
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
