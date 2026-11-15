@@ -1,0 +1,43 @@
+From dc201e2469e68477fd38e8d372200c1b774fe980 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 21:39:28 +0100
+Subject: [PATCH] umi: framebuffer (0310): boot-arg sweetfb_vhz=N sets the
+ vsync rate iOS is told (default 60) - the phone renders 10-30 fps against a
+ 60 Hz rhythm; test whether CoreAnimation's blur animation behaves at the rate
+ the phone reaches
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index dfdb313..6c4ef0f 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -77,7 +77,9 @@ enum {
+ #define SWEET_FB_LAYERS                 4
+ #define SWEET_FB_NOTIFY_TYPES           8
+ #define SWEET_FB_NOTIFY_VSYNC           5
+-#define SWEET_FB_VSYNC_US               16667
++/* (0310) the vsync period: boot-arg sweetfb_vhz=N (default 60) - the rate iOS is told the display refreshes at */
++static uint32_t sweet_fb_vsync_us = 16667;
++#define SWEET_FB_VSYNC_US               sweet_fb_vsync_us
+ #define SWEET_FB_DOT_PITCH              458     /* ppi, as the iPhone X panel */
+ /*
+  * The iOS userland only has status bar / layout data for real iPhone
+@@ -336,6 +338,11 @@ AppleCLCD::start(IOService *provider)
+ 	 * (sweetfb_vsyncfix=0: the old behaviour, re-armed 16.7 ms after each tick's work and period 0) */
+ 	uint32_t vsyncFix = 1;
+ 	PE_parse_boot_argn("sweetfb_vsyncfix", &vsyncFix, sizeof(vsyncFix));
++	uint32_t vhz = 60;
++	if (PE_parse_boot_argn("sweetfb_vhz", &vhz, sizeof(vhz)) && vhz >= 10 && vhz <= 120) {
++		sweet_fb_vsync_us = 1000000 / vhz;
++		IOLog("SWEET FB: vsync %u Hz (%u us) (0310)\n", vhz, sweet_fb_vsync_us);
++	}
+ 	fVsyncFixed = vsyncFix != 0;
+ 	nanoseconds_to_absolutetime((uint64_t)SWEET_FB_VSYNC_US * 1000ull, &fVsyncPeriod);
+ 	fVsyncNext = mach_absolute_time() + fVsyncPeriod;
+-- 
+2.54.0 (Apple Git-157)
+

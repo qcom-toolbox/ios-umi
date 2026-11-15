@@ -306,6 +306,11 @@
     written surface at completion; Turnip's own BOs are mapped write-combined). **Workaround, user-confirmed clean:
     Settings > Accessibility > Display & Text Size > Reduce Transparency on** (live blurs become tinted backgrounds).
     Root cause still open.
+  - **0310** (patch `xnu/patches/0310-umi-fb-vsync-rate.patch`, kernel dc201e2 on top of 0309): boot-arg `sweetfb_vhz=N`
+    sets the vsync rate iOS is told (timer + period in notification 5; default 60). User's idea: the phone renders
+    10-30 fps against a 60 Hz rhythm. Images: `shim/out/umi-0310.img` (0309's boot line, 60 Hz),
+    `shim/out/umi-0310-vhz30.img` (+ sweetfb_vhz=30, sweettop=10 dropped for the 607-char limit). Test: Reduce
+    Transparency off, widget page / App Library / status bar.
 
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
