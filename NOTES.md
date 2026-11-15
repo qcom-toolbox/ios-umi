@@ -283,6 +283,21 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
+  use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
+  - backboardd env `CA_COLOR_FLUSH=1` for one boot: the UI had "0 glitch" (user), at ~8.6 fps and 18 ms GPU wait like
+    without it; the idle home screen only redrew a small status-bar square. `CA_DISABLE_DIRTY_REGIONS=1` (full redraws,
+    no flashes) next boot: still glitchy -> partial redraws are not the cause; colour flush's wait for the GPU after
+    each flash is the difference. Both removed again (launchd.plist = the gain-map version; copies
+    `launchd.plist.sweet-colorflush` / `.sweet-dirtyregions` in `~/ios-umi-backup/gpu-2026-11-15/`).
+  - Lead: IOSurfaceIsInUse is how CoreAnimation, CoreVideo pools and apps decide a buffer can be drawn into or recycled;
+    Apple's GPU driver raises the use count while a command buffer touching the surface is in flight. Kernel 0303 keeps the
+    count (state page +0x18, shared by all clients), but nothing on the GPU side raised it. SweetMetal2 now
+    IOSurfaceIncrementUseCount()s every surface a command buffer uses at commit and decrements at completion / failure
+    (diff `phone/metal2/frontend-iosurface-usecount.diff`, build `out-usecount`, sha256 aaa562ce...; previous plugin
+    38651f4e... as `SweetMetal2.sweet-pre-usecount` on the phone and in the backup dir; mtl2-env
+    `SWEET_MTL2_NO_USECOUNT=1` = off). Not yet checked.
+
 - **2026-11-15 15:50: crash loop = speech synthesizer extensions without a container path; 0307** (patch
   `xnu/patches/0307-umi-sandbox-appex-container.patch`, kernel a05e6a8 on top of 0305 (0306 reverted), image
   **`shim/out/umi-0307-appex-container.img`** = 0305's boot line, built, not booted).

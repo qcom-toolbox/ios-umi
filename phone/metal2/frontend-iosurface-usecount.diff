@@ -1,0 +1,67 @@
+--- /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm.pre-usecount	2026-11-15 19:51:39
++++ /Users/enzo/ios-sweet-port/xnu-work/work/m2v-bridge-src/NativeBridgeMetalFrontend.mm	2026-11-15 19:51:40
+@@ -890,6 +890,7 @@
+ @property(nonatomic) uint32_t commitIndex;
+ @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
+ @property(nonatomic,strong) NSMutableSet *surfaces,*writtenSurfaces;
++@property(nonatomic,strong) NSMutableArray *inUseSurfaces;   // IOSurfaces whose use count this command buffer raised
+ // Runtime handles retain GPU storage, but only the Objective-C owner retains
+ // a no-copy deallocator, its memory owner and texture/heap ancestry.
+ @property(nonatomic,strong) NSMutableSet *resourceOwners;
+@@ -1345,6 +1346,31 @@
+ 
+ static void completed(void *context);
+ static void scheduled(void *context);
++// SweetMetal2: Apple's GPU driver counts an IOSurface "in use" while a command buffer that touches it is in flight, and
++// IOSurfaceIsInUse is how CoreAnimation, CoreVideo pools and apps know a buffer can be drawn into or recycled. Nothing raised it
++// here: every surface looked free while the GPU was still compositing it, and the next frame was drawn over it (repeated and
++// half-old frames on the home and lock screens; with CA_COLOR_FLUSH, whose flashes wait for the GPU, the glitches were gone).
++// The count is raised at commit for each surface the command buffer uses and lowered when it completes or fails.
++// /var/local/mtl2-env SWEET_MTL2_NO_USECOUNT=1: off.
++static void markSurfacesInUse(NBCommandBuffer *cb) {
++ static const bool off=getenv("SWEET_MTL2_NO_USECOUNT") && !strcmp(getenv("SWEET_MTL2_NO_USECOUNT"),"1");
++ if(off || !cb.surfaces.count)return;
++ NSMutableArray *used=[NSMutableArray array];
++ NSMutableSet *seen=[NSMutableSet set];
++ for(id item in cb.surfaces) {
++  IOSurfaceRef surface=[item isKindOfClass:[NBTexture class]]?[(NBTexture *)item surface]:
++                       ([item isKindOfClass:[NBBuffer class]]?[(NBBuffer *)item surfaceOwner]:nullptr);
++  if(!surface || [seen containsObject:(__bridge id)surface])continue;
++  [seen addObject:(__bridge id)surface];
++  IOSurfaceIncrementUseCount(surface);
++  [used addObject:(__bridge id)surface];   // the array keeps the surface alive until the count is lowered
++ }
++ cb.inUseSurfaces=used;
++}
++static void releaseSurfacesInUse(NBCommandBuffer *cb) {
++ NSMutableArray *used=cb.inUseSurfaces;cb.inUseSurfaces=nil;
++ for(id surface in used)IOSurfaceDecrementUseCount((__bridge IOSurfaceRef)surface);
++}
+ @implementation NBCommandBuffer
+ - (instancetype)init {
+  if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_writtenSurfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
+@@ -1536,13 +1562,16 @@
+  @synchronized(gInFlight){[gInFlight addObject:self];}
+  if(!self.encodeFailure) {
+   flushSurfaces(_surfaces,true);
++  markSurfacesInUse(self);
+   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
+   void *context=(__bridge_retained void *)self;
+   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
+      nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle))return;
+   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers
++  releaseSurfacesInUse(self);
+   [self refuse:[@"commit: " stringByAppendingString:lastError()]];
+  }
++ releaseSurfacesInUse(self);
+  self.failedLocally=YES;gCommitFailures++;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{[self finish];});
+ }
+@@ -1576,6 +1605,7 @@
+   CommitRecord &r=gCommitRing[commandBuffer.commitIndex%32];
+   if(r.index==commandBuffer.commitIndex)r.callbackUs=took;
+  }
++ releaseSurfacesInUse(commandBuffer);
+  [commandBuffer finish];
+ }
+ 
