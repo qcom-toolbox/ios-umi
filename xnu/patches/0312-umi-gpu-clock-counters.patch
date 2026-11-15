@@ -1,0 +1,72 @@
+From 6edc194ed57127e367973b4a824d4890120c4820 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 21:55:03 +0100
+Subject: [PATCH] umi: GPU (0312): count the core's clock and busy cycles (CP
+ perf counters 0/1) and print the measured MHz and busy % every sweettop round
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_adreno.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/bsd/dev/sweet_adreno.c b/bsd/dev/sweet_adreno.c
+index 3882ceb..1b333fe 100644
+--- a/bsd/dev/sweet_adreno.c
++++ b/bsd/dev/sweet_adreno.c
+@@ -2018,6 +2018,13 @@ sa_step_zap_load(void)
+ #define RBBM_INTERFACE_HANG_INT_CNTL GPU_WORD(0x001f)
+ #define RBBM_STATUS_GPU_BUSY    (1u << 23)      /* GPU_BUSY_IGN_AHB, what Linux's _a6xx_check_idle looks at */
+ #define RBBM_PERFCTR_CNTL       GPU_WORD(0x0500)
++/* (0312) CP perf counters 0/1: core clock cycles (PERF_CP_ALWAYS_COUNT 0) and busy cycles (PERF_CP_BUSY_CYCLES 2) */
++#define CP_PERFCTR_CP_SEL_0     GPU_WORD(0x0800)
++#define CP_PERFCTR_CP_SEL_1     GPU_WORD(0x0801)
++#define RBBM_PERFCTR_CP_0_LO    GPU_WORD(0x0400)
++#define RBBM_PERFCTR_CP_0_HI    GPU_WORD(0x0401)
++#define RBBM_PERFCTR_CP_1_LO    GPU_WORD(0x0402)
++#define RBBM_PERFCTR_CP_1_HI    GPU_WORD(0x0403)
+ #define RBBM_PERFCTR_GPU_BUSY_MASKED GPU_WORD(0x050b)
+ #define RBBM_NC_MODE_CNTL       GPU_WORD(0x0534)
+ #define CP_RB_CNTL              GPU_WORD(0x0802)
+@@ -2265,6 +2272,8 @@ sa_core_registers(void)
+ 	sa_put(&sa_gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00300200);       /* a6xx_catalog.c A650 prim_fifo_threshold */
+ 	sa_put(&sa_gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
+ 	sa_put(&sa_gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
++	sa_put(&sa_gpu, "cp_perfctr_cp_sel_0 (clock)", CP_PERFCTR_CP_SEL_0, 0);
++	sa_put(&sa_gpu, "cp_perfctr_cp_sel_1 (busy)", CP_PERFCTR_CP_SEL_1, 2);
+ 	/* a6xx_set_ubwc_config, A650: highest bank bit 16, amsbc, rgb565 predicator, uavflagprd_inv 2, macrotile */
+ 	sa_put(&sa_gpu, "rb_nc_mode_cntl", RB_NC_MODE_CNTL, 0x816);
+ 	sa_put(&sa_gpu, "tpl1_nc_mode_cntl", TPL1_NC_MODE_CNTL, 0x6);
+@@ -2870,6 +2879,30 @@ sweet_adreno_top(uint32_t secs)
+ 	    sa_stat.slept - sa_stat_last.slept, ns / NSEC_PER_MSEC, sa_stat.sleeps - sa_stat_last.sleeps,
+ 	    sa_stat.irqs - sa_stat_last.irqs, sa_irq_on ? "on" : "off");
+ 	sa_stat_last = sa_stat;
++	/* (0312) the core's real clock and how busy it was: CP counters 0 (every core clock) and 1 (busy clocks) */
++	{
++		static uint64_t last_clk, last_busy, last_t;
++		uint32_t hi, lo;
++		do {
++			hi = sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_0_HI);
++			lo = sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_0_LO);
++		} while (hi != sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_0_HI));
++		uint64_t clk = (uint64_t)hi << 32 | lo;
++		do {
++			hi = sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_1_HI);
++			lo = sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_1_LO);
++		} while (hi != sa_rd(sa_gpu.base + RBBM_PERFCTR_CP_1_HI));
++		uint64_t busy = (uint64_t)hi << 32 | lo, t = mach_absolute_time(), tns = 0;
++		absolutetime_to_nanoseconds(t - last_t, &tns);
++		if (last_t != 0 && tns != 0 && clk >= last_clk && busy >= last_busy) {
++			uint64_t dc = clk - last_clk, db = busy - last_busy;
++			printf("SWEET ADRENO: core clock %llu MHz (counted), busy %llu %% of its cycles (0312)\n",
++			    dc * 1000 / tns, dc ? db * 100 / dc : 0);
++		}
++		last_clk = clk;
++		last_busy = busy;
++		last_t = t;
++	}
+ 	if (sa_recoveries != 0 || sa_smmu_faults != 0) {
+ 		printf("SWEET ADRENO: since boot: %u SMMU faults, %u hang recoveries (%u failed), %u submissions dropped%s\n",
+ 		    sa_smmu_faults, sa_recoveries, sa_recover_failures, sa_recover_dropped, sa_core_dead ? "; THE CORE IS DEAD" : "");
+-- 
+2.54.0 (Apple Git-157)
+

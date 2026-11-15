@@ -293,7 +293,11 @@
     (ACV e, MC0 e, SH0 e) (0311)". `sweetddr=0` = no vote. Costs power / heat while it holds.
   - **0311 booted: votes accepted (ACV 0x8 at 0x5007c, MC0 0x3fff at 0x50000, SH0), but no gain:** GPU wait still ~31 ms
     mean per frame, kernel submit overhead only a few ms (walk 1-3 ms, cleans 5-11 ms per 10 s). DDR bandwidth is not
-    what limits the GPU. Daily image stays `umi-0310.img` (0311 costs power for nothing measured).
+    what limits the GPU. User: "a lil less glitchy" -> 0311 is the daily image; goal now: make the phone faster.
+  - **0312** (patch `xnu/patches/0312-umi-gpu-clock-counters.patch`, kernel 6edc194 on top of 0311, image
+    **`shim/out/umi-0312-gpu-clock.img`**, 0309's boot line): CP perf counter 0 = PERF_CP_ALWAYS_COUNT (core clocks),
+    counter 1 = PERF_CP_BUSY_CYCLES; each sweettop round logs "core clock N MHz (counted), busy P % of its cycles". The
+    clock count stops while the GPU's clocks are gated, so N is a floor when the GPU idles.
   - Open for GPU speed: is the core really at 490 MHz (GMU perf vote applied? read the GPU's own cycle counter against
     time), does Turnip render through GMEM or sysmem for backboardd's passes, and `TU_DEBUG=noubwc` (no UBWC) doubles
     the memory traffic of every render target.
