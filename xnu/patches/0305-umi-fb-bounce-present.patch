@@ -1,0 +1,248 @@
+From d5313cae0b00cd3087edaae960210bcbeee23325 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 15:16:37 +0100
+Subject: [PATCH] umi: framebuffer (0305): bounce present - a full frame whose
+ surface has no scanout-pool slot is copied into a pool slot the framebuffer
+ owns and scanned out like a direct frame (scaled); CoreAnimation remakes its
+ framebuffers before freeing the old ones, so the new ones never got slots and
+ every frame took the 1:1 copy path (old frames repeating)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 142 +++++++++++++++++++++++++-
+ iokit/Kernel/arm/SweetSurface.cpp     |  21 ++++
+ 2 files changed, 162 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e925bc5..b1ba007 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -154,6 +154,15 @@ public:
+ 	bool          fLastDirect;    /* the last frame went out directly */
+ 	SweetSurface *fLastSurf;      /* surface of the last direct frame */
+ 	uint64_t      fLastOff;       /* its panel window: byte offset in the surface */
++	/* (0305) bounce buffers: pool slots the framebuffer owns, for full frames whose surface has no slot */
++	int           fBounceSlot[2];
++	uint64_t      fBouncePA[2];
++	uint32_t      fBounceSize[2];
++	uintptr_t     fBounceVA[2];
++	IOMemoryMap  *fBounceMap[2];
++	uintptr_t     fLastBounceVA;  /* != 0: the last frame went out from this bounce buffer (fade reads it) */
++	uint32_t      fLastBounceBpr;
++	uint64_t      fBounces;
+ 	SweetSurface *fPendHold[SWEET_FB_LAYERS], *fShowHold[SWEET_FB_LAYERS], *fRetireHold[SWEET_FB_LAYERS];
+ 	/* (0244) frames replaced on the panel, held for fRetireTicks more vsyncs before CoreAnimation may draw
+ 	 * into them again: [0] newest; a command-mode panel latches a flip at its next refresh and keeps
+@@ -170,6 +179,8 @@ public:
+ 	void          scanBoot();
+ 	void          scanDump();
+ 	bool          directPresent(const uint8_t *rec);
++	bool          bouncePresent(const uint8_t *rec);
++	bool          bounceTake(uint32_t i);
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -288,6 +299,7 @@ AppleCLCD::start(IOService *provider)
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	sweet_busy_init();
++	fBounceSlot[0] = fBounceSlot[1] = -1;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -436,10 +448,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 			/* the fade works on the boot framebuffer: bring the last direct frame over */
+ 			SweetSurface *last = fb->fLastSurf;
+ 			uintptr_t va = last != NULL ? last->kernelAddress() : 0;
++			uint32_t bpr = last != NULL ? last->bytesPerRow : 0;
++			if (fb->fLastBounceVA != 0) {   /* (0305) the last frame was a bounce buffer's */
++				va = fb->fLastBounceVA;
++				bpr = fb->fLastBounceBpr;
++			}
+ 			if (va != 0) {
+ 				for (uint32_t y = 0; y < fb->fHeight; y++) {
+ 					memcpy((void *)(fb->fPixels + (uint64_t)y * fb->fRowBytes),
+-					    (const void *)(va + fb->fLastOff + (uint64_t)y * last->bytesPerRow), (size_t)fb->fWidth * 4);
++					    (const void *)(va + fb->fLastOff + (uint64_t)y * bpr), (size_t)fb->fWidth * 4);
+ 				}
+ 			}
+ 			fb->scanBoot();
+@@ -1354,6 +1371,125 @@ sweet_fb_scanflush(void)
+  * shown by pointing the pipe at its panel window. Returns false for the copy
+  * path.
+  */
++/*
++ * (0305) Bounce present. CoreAnimation makes its new framebuffer surfaces before it frees the old ones, so
++ * after it remakes them (seen mid-session on 0303, surfaces 2/3 -> 614/615) both scanout-pool slots are still
++ * the old surfaces' and the new ones get ordinary memory: every frame then took the copy path - the boot
++ * framebuffer at 1:1 (not scaled like direct frames since 0296), refreshed every few vsyncs - and the screen
++ * showed old frames over and over. Here a single full frame without a slot is copied (one memcpy, the GPU's
++ * lines dropped first) into one of two pool slots this framebuffer takes for itself, and that is scanned out
++ * exactly like a direct present (same window, same scaling). Boot-arg sweetfb_bounce=0: the copy path again.
++ */
++extern "C" int sweet_scanout_take_slot(uint64_t *pa, uint32_t *size);     /* SweetSurface.cpp */
++
++bool
++AppleCLCD::bounceTake(uint32_t i)
++{
++	uint64_t pa = 0;
++	uint32_t size = 0;
++	int slot = sweet_scanout_take_slot(&pa, &size);
++	if (slot < 0) {
++		return false;
++	}
++	IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, size, kIODirectionInOut);
++	IOMemoryMap *map = md != NULL ? md->createMappingInTask(kernel_task, 0,
++	    kIOMapAnywhere | kIOMapWriteCombineCache) : NULL;
++	OSSafeReleaseNULL(md);
++	if (map == NULL) {
++		extern void sweet_scanout_give_slot(int slot);
++		sweet_scanout_give_slot(slot);
++		return false;
++	}
++	fBounceSlot[i] = slot;
++	fBouncePA[i] = pa;
++	fBounceSize[i] = size;
++	fBounceMap[i] = map;
++	fBounceVA[i] = (uintptr_t)map->getVirtualAddress();
++	IOLog("SWEET FB: bounce buffer %u = pool slot %d at %#llx (%u bytes)\n", i, slot, pa, size);
++	return true;
++}
++
++bool
++AppleCLCD::bouncePresent(const uint8_t *rec)
++{
++	static int enabled = -1;
++	if (enabled < 0) {
++		int v = 1;
++		PE_parse_boot_argn("sweetfb_bounce", &v, sizeof(v));
++		enabled = v != 0;
++	}
++	if (!enabled || fPipe == NULL) {
++		return false;
++	}
++	uint32_t mask = get32(rec, 0x104), layer = SWEET_FB_LAYERS, n = 0;
++	for (uint32_t i = 0; i < SWEET_FB_LAYERS; i++) {
++		if ((mask & (1u << i)) && get32(rec, 0x54 + 4 * i) != 0) {
++			layer = i;
++			n++;
++		}
++	}
++	if (n != 1) {
++		return false;
++	}
++	SweetSurface *s = sweet_surface_copy(get32(rec, 0x54 + 4 * layer));
++	if (s == NULL) {
++		return false;
++	}
++	bool ok = false;
++	uintptr_t src = s->kernelAddress();
++	uint32_t bpr = s->bytesPerRow;
++	uint64_t bytes = (uint64_t)bpr * s->height;
++	if (s->scanoutPhys == 0 && src != 0 && s->bytesPerElement == 4 && s->planeCount <= 1 &&
++	    s->elementWidth == 1 && s->elementHeight == 1 && s->width >= fWidth && s->height >= fHeight &&
++	    bpr <= 0xffff && (bpr & 0xf) == 0 && (uint64_t)s->offset + bytes <= s->allocSize) {
++		for (uint32_t i = 0; i < 2; i++) {
++			if (fBounceSlot[i] < 0) {
++				bounceTake(i);
++			}
++		}
++		/* the buffer the pipe is not fetching now; with one buffer only, that one (may tear) */
++		int b = -1;
++		for (uint32_t i = 0; i < 2; i++) {
++			if (fBounceSlot[i] >= 0 && bytes <= fBounceSize[i] &&
++			    (b < 0 || (fScanPhys >= fBouncePA[b] && fScanPhys < fBouncePA[b] + fBounceSize[b]))) {
++				b = (int)i;
++			}
++		}
++		if (b >= 0) {
++			sweet_dcache_flush(src + s->offset, bytes);     /* the GPU wrote it: read memory, not old lines */
++			memcpy((void *)fBounceVA[b], (const void *)(src + s->offset), (size_t)bytes);
++			__asm__ volatile ("dsb sy" ::: "memory");
++			uint32_t ox = (s->width - fWidth) / 2, oy = (s->height - fHeight) / 2;
++			bool fit = false;
++			if (s->width == fLogicalW && s->height == fLogicalH) {
++				ox = (uint32_t)fOffX;
++				oy = (uint32_t)fOffY;
++				if (fFitOK) {
++					fit = true;
++					ox = oy = 0;
++				}
++			}
++			uint64_t off = (uint64_t)oy * bpr + (uint64_t)ox * 4;
++			scanFrom(fBouncePA[b] + off, bpr, fit);
++			IOLockLock(fLock);
++			SweetSurface *old = fLastSurf;
++			fLastSurf = NULL;       /* nothing scans the surface itself: let its memory (or slot) go */
++			fLastBounceVA = fBounceVA[b];
++			fLastBounceBpr = bpr;
++			fLastOff = fit ? (uint64_t)fOffY * bpr + (uint64_t)fOffX * 4 : off;
++			IOLockUnlock(fLock);
++			OSSafeReleaseNULL(old);
++			ok = true;
++			if (fBounces++ % 512 == 0) {
++				IOLog("SWEET FB: bounce present %llu: surface %u %ux%u bpr %u -> buffer %d (%s)\n", fBounces,
++				    get32(rec, 0x54 + 4 * layer), s->width, s->height, bpr, b, fit ? "scaled" : "1:1");
++			}
++		}
++	}
++	s->release();
++	return ok;
++}
++
+ bool
+ AppleCLCD::directPresent(const uint8_t *rec)
+ {
+@@ -1461,6 +1597,7 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 			SweetSurface *old = fLastSurf;
+ 			s->retain();
+ 			fLastSurf = s;
++			fLastBounceVA = 0;
+ 			/* the fade copies a panel-sized window 1:1: the crop window when the frame was scaled */
+ 			fLastOff = fit ? s->offset + (uint64_t)fOffY * s->bytesPerRow + (uint64_t)fOffX * 4 : off;
+ 			IOLockUnlock(fLock);
+@@ -1524,6 +1661,9 @@ AppleCLCD::present(const uint8_t *rec)
+ 
+ 	if (fDirect) {
+ 		fLastDirect = directPresent(rec);
++		if (!fLastDirect) {
++			fLastDirect = bouncePresent(rec);
++		}
+ 		if (!fLastDirect) {
+ 			scanBoot();     /* copy path: show the boot framebuffer we copy into */
+ 		}
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 289d1b7..9fce497 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -172,6 +172,27 @@ sweet_scanout_free_slot(int slot)
+ 	IOLockUnlock(sweet_surface_lock);
+ }
+ 
++/* (0305) a pool slot for the framebuffer's own bounce buffers (SweetFramebuffer bouncePresent) */
++extern "C" int
++sweet_scanout_take_slot(uint64_t *pa, uint32_t *size)
++{
++	if (sweet_scanout_pool == 0) {
++		return -1;
++	}
++	int slot = sweet_scanout_alloc_slot();
++	if (slot >= 0) {
++		*pa = sweet_scanout_pool + (uint64_t)slot * sweet_scanout_slot_size;
++		*size = sweet_scanout_slot_size;
++	}
++	return slot;
++}
++
++void
++sweet_scanout_give_slot(int slot)
++{
++	sweet_scanout_free_slot(slot);
++}
++
+ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+ 
+ /*
+-- 
+2.54.0 (Apple Git-157)
+

@@ -283,6 +283,29 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 15:20: Photos grid / HEIC wallpaper / App Library glitch = display path, not GPU; CA_DISABLE_DETACHED
+  + framebuffer bounce present (0305)** (patch `xnu/patches/0305-umi-fb-bounce-present.patch`, kernel d5313ca on top
+  of 0304, image **`shim/out/umi-0305-fb-bounce.img`** = 0304's boot line exactly, built, not booted).
+  - Symptom: Photos thumbnails black / partial / stacked, double text ("8 Photos" twice), HEIC wallpaper and App
+    Library glitch; screenshots look right (backboardd re-renders the whole tree). Ruled out: SweetMetal2 IOSurface
+    plane path, texture pool, present timing, CPU cache (SWEET_MTL2_FLUSH_ALL=1 on a 0303 boot: no change), HEIC decode
+    (0302/0303 byte-identical to the Mac).
+  - Cause 1: CoreAnimation "detached" layers (extra IOMFB planes, mask 0x7: 253 of 2787 presents on 0295). SweetFramebuffer
+    has no multi-layer composition: such swaps take the copy path (memcpy of each layer's rect into the boot framebuffer,
+    opaque, unscaled, bpe 4 only, shown 1:1 while direct frames are scaled since 0296). **Fix: backboardd env
+    `CA_DISABLE_DETACHED=1`** (launchd.plist EnvironmentVariables; user OK'd; previous file `launchd.plist.sweet-pre-cadetach`
+    on the phone and in `~/ios-umi-backup/gpu-2026-11-15/`). CA reads its CA_* debug options with getenv (name table at
+    QuartzCore 0x18859dbd8, 20H392). On the next boot every swap was one layer (mask 0x1).
+  - Cause 2 (seen on that boot): around present 1050 CoreAnimation remade its framebuffers (surfaces 2/3 -> 614/615).
+    It creates the new ones before freeing the old, so both scanout-pool slots were still taken and 614/615 got plain
+    memory ("not the panel's shape ... scanout 0") -> every frame took the copy path (1:1, refreshed every few
+    vsyncs): "frames repeat indefinitely" (user). **0305**: bouncePresent() copies such a single full frame (one
+    memcpy after dropping the GPU's lines) into one of two pool slots the framebuffer takes for itself (mapped
+    write-combined) and scans it out like a direct frame (same window, same scaling); fLastSurf is let go so the old
+    surfaces' slots free. Logs "SWEET FB: bounce buffer N = pool slot ..." and "bounce present N" every 512th.
+    Boot-arg `sweetfb_bounce=0` = old copy path. Cost: an 11 MB flush + copy per frame while bouncing.
+  - `/var/local/mtl2-env` back to its original line (FLUSH_ALL test over; backup `mtl2-env.sweet-pre-flushall`).
+
 - **2026-11-15 15:15: 0295 booted (in 0303, two boots): still no join at boot; 0304 dumps what wifid's refused
   set 383 carries** (patch `xnu/patches/0304-umi-wlan-refused-dump.patch`, kernel 41f6efd on top of 0303, image
   **`shim/out/umi-0304-wifi-dump.img`** = 0295 boot-args + 0296..0304, built, not booted).
