@@ -1,0 +1,76 @@
+From d18ca84ca9ab449bbe7059fef27430b866fc06af Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 21:49:05 +0100
+Subject: [PATCH] umi: GPU (0311): vote DDR (MC0), system cache (SH0) and
+ DDR-active (ACV) bandwidth over RPMh once the GPU is up - nothing voted
+ memory bandwidth (the GMU table has only the off level, as on Linux where
+ devfreq votes it from the CPU side); sweetddr=0 = no vote
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_adreno.c | 18 ++++++++++++++++++
+ bsd/dev/sweet_rpmh.c   |  8 ++++++--
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/sweet_adreno.c b/bsd/dev/sweet_adreno.c
+index 16a5969..3882ceb 100644
+--- a/bsd/dev/sweet_adreno.c
++++ b/bsd/dev/sweet_adreno.c
+@@ -4637,6 +4637,24 @@ sa_thread(__unused void *arg, __unused wait_result_t wr)
+ 		sa_undo_all();
+ 	}
+ 	printf("SWEET GPU: done\n");
++	/*
++	 * (0311) Memory bandwidth for the GPU. Our GMU bandwidth table has only the "off" level (as Linux's a650 table: there the
++	 * DDR / system-cache bandwidth is voted from the CPU side, adreno devfreq -> interconnect -> RPMh BCMs), and nothing here
++	 * voted it: DDR ran at whatever the boot left while backboardd composited 11 MB frames (~20 ms of GPU time each).
++	 * Vote DDR (MC0) and the system cache (SH0) at their highest level and keep DDR active (ACV, sm8250 enable mask 0x8).
++	 * Boot-arg sweetddr=0: no vote.
++	 */
++	{
++		extern int sweet_rpmh_bcm_vote(const char *res, uint32_t vote_x, uint32_t vote_y);
++		uint32_t ddr = 1;
++		(void)PE_parse_boot_argn("sweetddr", &ddr, sizeof(ddr));
++		if (ddr != 0) {
++			int e1 = sweet_rpmh_bcm_vote("ACV", 0x8, 0x8);
++			int e2 = sweet_rpmh_bcm_vote("MC0", 0x3fff, 0x3fff);
++			int e3 = sweet_rpmh_bcm_vote("SH0", 0x3fff, 0x3fff);
++			printf("SWEET GPU: memory bandwidth voted (ACV %d, MC0 %d, SH0 %d) (0311)\n", e1, e2, e3);
++		}
++	}
+ 	(void)thread_terminate(current_thread());
+ }
+ 
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 3b9d995..90ec1cb 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -493,7 +493,9 @@ sweet_rpmh_smps_enable(const char *res, unsigned mv)
+ int
+ sweet_rpmh_bcm_vote(const char *res, uint32_t vote_x, uint32_t vote_y)
+ {
+-	if (!sweet_board_is_umi() || !res || strcmp(res, "QUP0")) {
++	/* (0311) also the DDR (MC0), system cache (SH0) and DDR-active (ACV) nodes, for the GPU's memory bandwidth */
++	if (!sweet_board_is_umi() || !res || (strcmp(res, "QUP0") && strcmp(res, "MC0") && strcmp(res, "SH0") &&
++	    strcmp(res, "ACV"))) {
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+@@ -508,11 +510,13 @@ sweet_rpmh_bcm_vote(const char *res, uint32_t vote_x, uint32_t vote_y)
+ 		}
+ 		if (!error) {
+ 			uint32_t data = (1u << 30) | (1u << 29) | ((vote_x & 0x3fffu) << 14) | (vote_y & 0x3fffu);
+-			error = rh_send_cmds(address, &address, &data, 1, "BCM QUP0");
++			error = rh_send_cmds(address, &address, &data, 1, "BCM vote");
+ 		}
+ 	}
+ 	if (error) {
+ 		printf("SWEET RPMH: BCM %s vote failed errno=%d\n", res, error);
++	} else if (strcmp(res, "QUP0")) {
++		printf("SWEET RPMH: BCM %s at %#x voted %#x/%#x\n", res, address, vote_x, vote_y);
+ 	}
+ 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+ 	return error;
+-- 
+2.54.0 (Apple Git-157)
+

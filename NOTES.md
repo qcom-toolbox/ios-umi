@@ -283,6 +283,15 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 21:50: GPU performance - 0311 votes memory bandwidth** (patch `xnu/patches/0311-umi-gpu-ddr-bandwidth-vote.patch`,
+  kernel d18ca84 on top of 0310, image **`shim/out/umi-0311-ddr-vote.img`** = 0309's boot line, built, not booted).
+  - backboardd's GPU time is ~20-40 ms per frame for plain compositing (an Adreno 650 at 490 MHz should need ~1-2 ms).
+    The GMU bandwidth table holds only the "off" level (as Linux's a650: there adreno devfreq votes DDR from the CPU
+    side through interconnect -> RPMh BCMs), and nothing in this port voted DDR: the only BCM vote was QUP0 (touch).
+  - 0311: sweet_rpmh_bcm_vote also takes MC0 (DDR), SH0 (system cache, LLCC) and ACV (DDR active, sm8250 enable mask
+    0x8); after "SWEET GPU: done" the GPU votes ACV 0x8 and MC0 / SH0 0x3fff (max) and logs "memory bandwidth voted
+    (ACV e, MC0 e, SH0 e) (0311)". `sweetddr=0` = no vote. Costs power / heat while it holds.
+
 - **2026-11-15 20:10: 0308 - drawables held until the panel latched the flip** (patch
   `xnu/patches/0308-umi-fb-latch-wait.patch`, kernel 0b94d58 on top of 0307b, image
   **`shim/out/umi-0308-latch-wait.img`** = 0307b's boot line, built, not booted).
