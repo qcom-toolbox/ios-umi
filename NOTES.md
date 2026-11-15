@@ -402,6 +402,15 @@
     Boot-arg `sweetfb_bounce=0` = old copy path. Cost: an 11 MB flush + copy per frame while bouncing.
   - `/var/local/mtl2-env` back to its original line (FLUSH_ALL test over; backup `mtl2-env.sweet-pre-flushall`).
 
+- **2026-11-15 20:15: 0304's dump read (live in 0305..0308 boots): still no join at boot in 13 boots; 0309 keeps
+  the country code** (patch `xnu/patches/0309-umi-wlan-country-code.patch`, kernel 5e41c9c on top of 0308, image
+  **`shim/out/umi-0309-wifi-country.img`** = 0295 boot-args + everything to 0309, built, not booted).
+  - Set 383 is not a network list: version 1, a length (247..304), then a small XML property list
+    (`<?xml ... <!DOCTYPE plist`). Set 51 (COUNTRY_CODE) carries version 1 + 2 letters (the phone's country),
+    sent 24 times per boot and refused; get 51 refused too. Set 419 (136 bytes) = version 1 + one changing word.
+    No ASSOCIATE in any of the 13 boots; wifid reads SCAN_RESULT ~100 times per boot, gets 115 (1288 bytes) refused.
+  - 0309: set 51 kept, get 51 answers it (3 bytes); 383's plist printed once per boot as text (local log only).
+
 - **2026-11-15 15:15: 0295 booted (in 0303, two boots): still no join at boot; 0304 dumps what wifid's refused
   set 383 carries** (patch `xnu/patches/0304-umi-wlan-refused-dump.patch`, kernel 41f6efd on top of 0303, image
   **`shim/out/umi-0304-wifi-dump.img`** = 0295 boot-args + 0296..0304, built, not booted).

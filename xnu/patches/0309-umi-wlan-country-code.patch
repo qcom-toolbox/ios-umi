@@ -1,0 +1,91 @@
+From 5e41c9ced13717ffbf75931b4bcd7187f68d580c Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 20:13:26 +0100
+Subject: [PATCH] umi: wlan (0309): COUNTRY_CODE (51) set is kept and get
+ answered (wifid set 'CH' 24 times per boot, refused); set 383's XML property
+ list said once as text
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/redwood_apple80211.c | 44 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index 88f3681..d443812 100644
+--- a/bsd/dev/redwood_apple80211.c
++++ b/bsd/dev/redwood_apple80211.c
+@@ -294,6 +294,9 @@ give_network(const struct apple80211req *request, const struct redwood_sta_bss *
+ 	return error;
+ }
+ 
++/* umi 0309: the country wifid hands the driver (set 51: a version word, then 2 letters + NUL); "" = none yet. */
++static char country[3];
++
+ /* ---- get ---------------------------------------------------------------------------------------------- */
+ 
+ static int
+@@ -303,6 +306,8 @@ get(struct apple80211req *request)
+ 	int error = 0;
+ 
+ 	switch (request->req_type) {
++	case 51:                                /* umi 0309: the country, once wifid has set one (3 bytes: the text) */
++		return country[0] == 0 ? EOPNOTSUPP : give(request, country, sizeof(country));
+ 	case 43:
+ 	case 44: {                              /* the driver's and the hardware's name: the text alone, in 256 bytes */
+ 		static const char name[256] = "redwood: ath11k for the WCN6750";
+@@ -592,6 +597,19 @@ static int
+ set(const struct apple80211req *request, char *said, size_t said_size)
+ {
+ 	switch (request->req_type) {
++	case 51: {                              /* umi 0309: the country (wifid's locale), kept and read back */
++		uint8_t asked[8] = { 0 };
++		int error;
++
++		if (request->req_len < sizeof(asked) || (error = copyin(request->req_data, asked, sizeof(asked))) != 0) {
++			return EINVAL;
++		}
++		country[0] = (char)asked[4];
++		country[1] = (char)asked[5];
++		country[2] = 0;
++		snprintf(said, said_size, " (country: %c%c)", country[0] > ' ' ? country[0] : '?', country[1] > ' ' ? country[1] : '?');
++		return 0;
++	}
+ 	case 20:
+ 		return set_join(request, said, said_size);
+ 	case 22:                                /* leave the network */
+@@ -778,6 +796,32 @@ redwood_apple80211_ioctl(u_long command, void *data)
+ 			printf("error %d\n", error);
+ 		}
+ 	}
++	/* umi 0309: set 383 is a small XML property list after 8 bytes (version, length): said once as text. */
++	if (is_set && request->req_type == 383 && request->req_data != USER_ADDR_NULL && request->req_len > 8) {
++		static bool said383;
++
++		if (!said383) {
++			uint32_t head[2];
++			static char text[1024];
++
++			said383 = true;
++			if (copyin(request->req_data, head, sizeof(head)) == 0) {
++				unsigned n = head[1] < sizeof(text) - 1 ? head[1] : sizeof(text) - 1;
++
++				n = n < request->req_len - 8 ? n : request->req_len - 8;
++				if (copyin(request->req_data + 8, text, n) == 0) {
++					text[n] = 0;
++					for (unsigned c = 0; c < n; c++) {
++						text[c] = text[c] == '\n' || text[c] == '\t' ? ' ' : text[c] < ' ' || text[c] > '~' ? '.' : text[c];
++					}
++					printf("apple80211: set 383 (version %u, %u bytes) says:\n", head[0], head[1]);
++					for (unsigned c = 0; c < n; c += 120) {
++						printf("apple80211:   %.120s\n", text + c);
++					}
++				}
++			}
++		}
++	}
+ 	/* What a refused set carries: the first 64 bytes, a few times for each kind (local log only). */
+ 	if (is_set && error == EOPNOTSUPP && request->req_data != USER_ADDR_NULL && request->req_len > 0) {
+ 		static struct { int type; unsigned times; } dumped[8];
+-- 
+2.54.0 (Apple Git-157)
+
