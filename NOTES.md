@@ -298,6 +298,10 @@
     "Sandbox: launchd op 4": proc_find() takes a reference on the caller too, and 0307 released it only for other
     processes. **0307b** (kernel ad4cc56, patch `0307b-umi-sandbox-appex-container-ref.patch`, image
     **`shim/out/umi-0307b-appex-container.img`**, 0305's boot line): released whenever proc_find took it.
+  - **0307b booted (user): no panic, the speech-extension crash loop is gone** (crashes this boot: FitnessWidget 3,
+    WeatherPoster 1, CollectionsPoster 1); all processes 138 % of a core (was 612 %), ReportCrash / analyticsd /
+    aggregated gone from the top. backboardd 22-30 fps; GPU waits up to 1.6 s with backboardd alone submitting
+    (~27 jobs/s, ~40 ms each) - which screen was up not known yet.
 
 - **2026-11-15 15:45: HEIC wallpaper heavy = CoreAnimation gain-map layers; picker previews black = refused read-only
   no-copy buffers** (phone files changed, user OK'd; kernel stays 0305).
