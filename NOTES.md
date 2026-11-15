@@ -300,6 +300,12 @@
   - Status-bar session: libsweet-sb has no timer / animation. Test (user OK'd): `/usr/local/etc/sweet-sb.txt` = "0 0 2"
     (library a no-op) on a 0309 boot: idle home screen still ~10 fps redraw (~20 ms GPU), still flickering -> not the
     cause; the file was removed again (directory /usr/local/etc stays, empty). 0308 held 69 drawables on that boot.
+  - **The remaining flicker is the old blur bug** (user: widget page and status bar, the glitch reported from the start;
+    App Library the same). Traced on 2026-11-12: CoreAnimation's own blur radius collapses to 0 within ~8 frames, the
+    GPU draws what it is told. Ruled out today: stale CPU reads of GPU-written image buffers (the bridge flushes every
+    written surface at completion; Turnip's own BOs are mapped write-combined). **Workaround, user-confirmed clean:
+    Settings > Accessibility > Display & Text Size > Reduce Transparency on** (live blurs become tinted backgrounds).
+    Root cause still open.
 
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
