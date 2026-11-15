@@ -293,6 +293,11 @@
     write-protected decoded images) -> kIOReturnBadArgument -> Turnip VK_ERROR_INVALID_EXTERNAL_HANDLE. 0306 retries
     kIODirectionOut, maps the kernel view kIOMapReadOnly and BoMap maps the BO with PTE_READ_ONLY
     (sweet_adreno_map_at_ro). Logs "SWEET ADRENO: BoImport ... read-only pages -> imported read-only" (8 times).
+  - **0306 BOOTED 15:26 - BAD, do not use:** the read-only imports worked (4 x 1441792 bytes in backboardd, likely the
+    wallpaper), then backboardd's Vulkan device was lost (`commandBuffer refused: command buffer: DeviceLost` on every
+    command buffer; no kernel refusal, GPU fence 333 = submitted 333, 65 fence waits timed out in that 10 s), its render
+    thread sat in dispatch_group_wait and the lock screen repeated old frames. Back to 0305. Open: what in Turnip /
+    the runtime declares the device lost with a read-only BO (a write to bo->map, a fence-wait timeout, a submit flag).
 
 - **2026-11-15 15:20: Photos grid / HEIC wallpaper / App Library glitch = display path, not GPU; CA_DISABLE_DETACHED
   + framebuffer bounce present (0305)** (patch `xnu/patches/0305-umi-fb-bounce-present.patch`, kernel d5313ca on top
