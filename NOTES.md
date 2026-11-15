@@ -295,7 +295,12 @@
     change, so the copy is exact (kernel 0306 tried pinning it read-only instead and lost backboardd's device).
     Diff `phone/metal2/frontend-readonly-nocopy.diff`, build `xnu-work/work/m2v-bridge-src/out-rocopy` (sha256
     38651f4e...); previous plugin (c4c5d075...) as `SweetMetal2.sweet-pre-rocopy` on the phone and in the backup dir.
-    Logs "no-copy buffer over read-only memory (N bytes): made as a copy" (4 per process). Not yet checked.
+    Logs "no-copy buffer over read-only memory (N bytes): made as a copy" (4 per process). **Booted (0305): no
+    refusals left (copies in backboardd and PosterBoard); picker previews mostly right, some still with a black box.**
+  - Repeated frames on home / lock screen on that boot are CPU, not GPU: GPU wait ~2 ms, backboardd's
+    coreanimation.display.primary thread 79% of a core, 14-15 fps; CPUs thermally capped (silver 787 MHz, gold 1382 MHz,
+    XO_THERM ~58 C) with aggregated 184%, analyticsd 89%, ReportCrash 54% (something crash-looping), locationd 61%,
+    dasd ~65% (612% of 800% total).
 
 - **2026-11-15 15:25: 0305 booted: Photos grid fine (user); HEIC wallpaper fine once set, picker slow / flickering /
   blocks; 0306 = read-only GPU host imports** (patch `xnu/patches/0306-umi-gpu-readonly-host-import.patch`, kernel
