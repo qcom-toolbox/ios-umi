@@ -302,7 +302,13 @@
     counter 1's select probably did not take (counts every cycle) - not trusted.
   - **0313** (patch `xnu/patches/0313-umi-gpu-upper-speeds.patch`, kernel 89cf992 on top of 0312): the GPU speed table
     gets the phone's upper levels (live.dts gpu-opp-table_v2: 525 MHz @ 224, 587 @ 256, 670 @ 320), `sweetgpuspeed=4/5/6`.
-    Image **`shim/out/umi-0313-gpu587.img`** = 0309's boot line with sweetgpuspeed=5 (587 MHz). Not booted.
+    Image **`shim/out/umi-0313-gpu587.img`** = 0309's boot line with sweetgpuspeed=5 (587 MHz).
+    **Booted: the GMU took it, core clock counted 586 MHz; GPU wait per frame 14-18 ms (was 17-20 at 490).** CPUs still
+    thermally capped (silver 787, gold 1382 MHz); modem power-amp thermistors PA_THERM 46 C / PA_THERM1 55 C, XO 54 C -
+    the LTE radio is a big heat source (user's suspicion), not only the GPU.
+  - Still open for GPU speed: ~15 ms of GPU time per composited frame is far above what an A650 needs; next suspects are
+    TU_DEBUG=noubwc (UBWC off: every render target uncompressed) and whether Turnip uses GMEM or sysmem for
+    backboardd's passes.
   - Open for GPU speed: is the core really at 490 MHz (GMU perf vote applied? read the GPU's own cycle counter against
     time), does Turnip render through GMEM or sysmem for backboardd's passes, and `TU_DEBUG=noubwc` (no UBWC) doubles
     the memory traffic of every render target.
