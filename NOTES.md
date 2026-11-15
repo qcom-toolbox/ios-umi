@@ -283,6 +283,31 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-15 23:25: HEAT, booted 0314 + 0315 - the SoC itself is at 85-88 C with idle CPUs; modem side now quiet**
+  (patch `xnu/patches/0315-umi-x55-mhi-m3-diag-off.patch`, kernel 593745c on top of 0314, images
+  **`shim/out/umi-0315-mdm-m3.img`** = 0313's line - sweettop=10 + `sweetmdmsleep=5` (booted), and
+  `shim/out/umi-0315-mdm-quiet.img` = 0313's line, M3 off (built, not booted)).
+  - **0314 booted:** both sides took ASPM L1 (root port lnkctl 0x8 -> 0xa, X55 0 -> 0x2, PARF_PM_CTRL 0x20 -> 0),
+    LTE data up - but **0 % L1** (every LTSSM sample 0x11, ~80,000 per minute): the X55 never asks for M1 / M2
+    (only MHI "state 2" = M0 events), so it never lets the link idle by itself.
+  - **0315:** (1) MHI M3 after `sweetmdmsleep` quiet seconds (opt-in; MHICTRL state 5, MHISTATUS checked; back
+    to M0 on a channel / command doorbell, queued output or a change of WAKE# GPIO 87, then every running channel's
+    and event ring's doorbell rung again as Linux mhi_pm_m0_transition; event ring doorbells held while in M3;
+    3 failed entries switch it off). (2) DIAG off once registered (`sweetmdmdiagreg`, default 0; 0x18 = the old
+    error / fatal). (3) A per-minute "SWEET MDM: power:" line (DIAG messages, M3 share, why it left M3). (4)
+    sweet_cpufreq.c prints `SWEET TEMP: hottest core .., GPU ..; caps ..` every 10 s: the long CPUFREQ line lost
+    its temperature part in the UDP log at every boot, so the "67-70 C" read earlier came from a few early boots.
+  - **0315-m3 booted (23:15):** M3 works - MHISTATUS 0x501, 16-21 % of each minute in M3 at first (5 entries a
+    minute, left for output 3 / doorbell 2, WAKE# 0), no failures, data kept flowing (rx / tx counters grow).
+    **DIAG: 72,556 messages in the minute before registration** (~1,200 a second over the link, the modem CPU
+    formatting each), **0 after**. Link still 0 % L1 even in M3: the next modem step would be D3hot (PMCSR) in M3,
+    as pci-msm does, so the link goes to L1 by PCI-PM.
+  - **The real heat: the SoC.** With the CPUs idle (silver 300 MHz 0 % busy, gold / prime 6-12 %), the cores read
+    **84-88 C and the GPU sensor 83-87 C**, climbing; the charger cut the charge current (FCC 900 mA, temp status
+    0x20). That is not the radio. Suspects (GPU session's area): the GPU core clocked at 587 MHz and never gated
+    (0312 counted it running with 0 submits), 0311's DDR (MC0) / system cache (SH0) / ACV votes held at the
+    maximum for good, no CPU power collapse. Cheap test with the same kernel: `sweetddr=0` and `sweetgpuspeed=3`.
+
 - **2026-11-15 22:50: HEAT - the CPU caps come from the SoC, the X55 link never slept; 0314 lets it enter L1**
   (patch `xnu/patches/0314-umi-x55-pcie-aspm-l1.patch`, kernel 3d35e09 on top of 0313, images
   **`shim/out/umi-0314-pcie-l1.img`** = 0313's boot line (sweetgpuspeed=5), and `shim/out/umi-0314-pcie-l1ss.img` =

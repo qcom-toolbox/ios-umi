@@ -1,0 +1,223 @@
+From 593745c042879a035be4dc63b6cab189a383e4ea Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 23:20:40 +0100
+Subject: [PATCH] umi: modem (0315): MHI M3 while quiet (sweetmdmsleep=N s,
+ opt-in; back to M0 on a doorbell, output or WAKE#, all doorbells rung again),
+ DIAG off once registered (sweetmdmdiagreg), per-minute power line; cpufreq:
+ SWEET TEMP line (the long stats line was cut by the UDP log)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_cpufreq.c |   5 ++
+ bsd/dev/sweet_mdm.c     | 121 ++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 122 insertions(+), 4 deletions(-)
+
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+index a78adb4..5cbc465 100644
+--- a/bsd/dev/sweet_cpufreq.c
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -354,6 +354,11 @@ cpufreq_governor(__unused void *arg, __unused wait_result_t result)
+ 				dom->sum_khz = dom->sum_busy = 0;
+ 				dom->changes = 0;
+ 			}
++			/* 0315: the temperatures first, on a short line of their own (the UDP log cut the long one) */
++			printf("SWEET TEMP: hottest core %s (sensor %u), GPU %s; caps silver %u gold %u prime %u MHz\n", temp, which,
++			    gpu, cpufreq_dom[0].n ? cpufreq_dom[0].khz[cpufreq_dom[0].cap] / 1000 : 0,
++			    cpufreq_dom[1].n ? cpufreq_dom[1].khz[cpufreq_dom[1].cap] / 1000 : 0,
++			    cpufreq_dom[2].n ? cpufreq_dom[2].khz[cpufreq_dom[2].cap] / 1000 : 0);
+ 			printf("SWEET CPUFREQ: %u s: %s; hottest core %s (sensor %u), GPU %s\n",
+ 			    stats_s, line, temp, which, gpu);
+ 			stats_since = now;
+diff --git a/bsd/dev/sweet_mdm.c b/bsd/dev/sweet_mdm.c
+index 7a00d51..82ecba8 100644
+--- a/bsd/dev/sweet_mdm.c
++++ b/bsd/dev/sweet_mdm.c
+@@ -840,9 +840,35 @@ mx_rd64(uint32_t off)
+ 	return (uint64_t)mx32(off)[0] | (uint64_t)mx32(off)[1] << 32;
+ }
+ 
++/*
++ * 0315: MHI M3 while the modem is quiet (sweetmdmsleep=N s, default 0 = never). The X55 never asks for M1 / M2
++ * by itself (only "state 2" = M0 events seen), so in M0 it keeps its side of the link busy and ASPM L1 is never
++ * entered (0314: 0 % L1). The phone's own kernel suspends the MHI (M3) when idle; so does this: MHICTRL state
++ * M3, then the link may sleep. Out of M3 (M0, every running channel's and every event ring's doorbell rung
++ * again, as Linux mhi_pm_m0_transition) on any channel / command doorbell (mx_db: something to send), on a
++ * change of the WAKE# pin (87, the modem has something for us), or before the regular QMI polls. Event ring
++ * doorbells while in M3 are only held back (Linux: MHI_DB_ACCESS_VALID), the M0 path rings them.
++ */
++static struct {
++	bool m3, off;
++	unsigned enters, fails, ex_wake, ex_db, ex_out;
++	uint32_t wake0;
++	uint64_t since, total;  /* abs time */
++} mds;
++static void md_m3_exit(unsigned why);
++#define MDS_WAKE 0u
++#define MDS_DB   1u
++#define MDS_OUT  2u
++
+ static void
+ mx_db(uint32_t off, uint64_t v)
+ {
++	if (mds.m3) {
++		if (off >= mx.erdb && off < mx.erdb + 8u * 9u) {
++			return;                 /* an event ring: rung again on the way back to M0 */
++		}
++		md_m3_exit(MDS_DB);
++	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	md_wr(md.bar0, off + 4, (uint32_t)(v >> 32));
+ 	md_wr(md.bar0, off, (uint32_t)v);
+@@ -882,8 +908,11 @@ mx_er0(void)
+ 			mx.ee = code;
+ 			printf("SWEET MDM: MHI event: execution environment %u\n", code);
+ 		} else if (type == 0x20) {
++			static unsigned states;
+ 			mx.mstate = code;
+-			printf("SWEET MDM: MHI event: state %u\n", code);
++			if (states++ < 12) {
++				printf("SWEET MDM: MHI event: state %u\n", code);
++			}
+ 		} else if (type == 0x21) {
+ 			mx.cmd_code = (int)code;
+ 		} else {
+@@ -1008,6 +1037,61 @@ mx_ring(unsigned ch, uint32_t ring, uint32_t wp)
+ 	mx_db(mx.chdb + 8u * ch, a);
+ }
+ 
++static void
++md_m3_exit(unsigned why)
++{
++	if (!mds.m3) {
++		return;
++	}
++	mds.m3 = false;
++	mds.total += mach_absolute_time() - mds.since;
++	if (why == MDS_WAKE) {
++		mds.ex_wake++;
++	} else if (why == MDS_DB) {
++		mds.ex_db++;
++	} else {
++		mds.ex_out++;
++	}
++	md_wr(md.bar0, MHI_CTRL, (md_rd(md.bar0, MHI_CTRL) & ~0xff00u) | (2u << 8));
++	if (!md_poll(md.bar0, MHI_STATUS, 0xff00u, 2u << 8, 1000)) {
++		mds.fails++;
++		printf("SWEET MDM: M3 -> M0: no M0 after 1 s (status %#x)\n", md_rd(md.bar0, MHI_STATUS));
++	}
++	for (unsigned ch = 0; ch < 128; ++ch) {
++		if ((mx32(MH_CHCTX + ch * 44u)[0] & 0xffu) == 2u) {
++			mx_db(mx.chdb + 8u * ch, mx_rd64(MH_CHCTX + ch * 44u + 36));
++		}
++	}
++	for (unsigned e = 0; e < MH_NER; ++e) {
++		if (mx_rd64(MH_ERCTX + e * 44u + 12) != 0) {
++			mx_db(mx.erdb + 8u * e, mx_rd64(MH_ERCTX + e * 44u + 36));
++		}
++	}
++}
++
++static void
++md_m3_enter(void)
++{
++	if (mds.m3 || mds.off) {
++		return;
++	}
++	mds.wake0 = md_gpio_in(WAKE2_PIN);
++	md_wr(md.bar0, MHI_CTRL, (md_rd(md.bar0, MHI_CTRL) & ~0xff00u) | (5u << 8));
++	if (!md_poll(md.bar0, MHI_STATUS, 0xff00u, 5u << 8, 1000)) {
++		mds.fails++;
++		printf("SWEET MDM: M0 -> M3: no M3 after 1 s (status %#x)%s\n", md_rd(md.bar0, MHI_STATUS),
++		    mds.fails >= 3 ? ": M3 off for this run" : "");
++		mds.off = mds.fails >= 3;
++		mds.m3 = true;
++		mds.since = mach_absolute_time();
++		md_m3_exit(MDS_DB);
++		return;
++	}
++	mds.m3 = true;
++	mds.enters++;
++	mds.since = mach_absolute_time();
++}
++
+ static void
+ mx_rx_queue(unsigned buf)
+ {
+@@ -3708,12 +3792,16 @@ mx_qmi_survey(unsigned t_ms)
+ 		mq.next_poll = t_ms + (md.stage >= 9 && mq.reg == 1 ? 30000 : 10000);
+ 		if (md.stage >= 9 && mq.reg == 1 && !mq.quiet) {
+ 			/* registered: DIAG down to error / fatal (the F3 flood costs CPU and log) */
+-			static const uint8_t q[8] = { 0x7d, 0x05, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00 };
++			/* 0315: off altogether by default (sweetmdmdiagreg=0x18: error / fatal as before) */
++			uint8_t q[8] = { 0x7d, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
++			unsigned dm = 0;
++			(void)PE_parse_boot_argn("sweetmdmdiagreg", &dm, sizeof(dm));
++			q[4] = (uint8_t)dm;
+ 			mq.quiet = true;
+ 			if (dg.on) {
+ 				dg_send(q, 8);
+ 			}
+-			printf("SWEET MDM: registered: DIAG mask 0x18, polls every 30 s\n");
++			printf("SWEET MDM: registered: DIAG mask %#x, polls every 30 s\n", dm);
+ 		}
+ 		mx_qmi_req(0x03, 0x24, NULL, 0);
+ 		mx_qmi_req(0x03, 0x20, NULL, 0);
+@@ -3909,8 +3997,11 @@ md_mission(void)
+ 	bool printed_sfr = false;
+ 	uint64_t t0 = mach_absolute_time();
+ 	unsigned next_status = 10000, status_every = md.stage >= 9 ? 60000 : 10000;
+-	unsigned idle_ms = 20, quiet_since = 0;
++	unsigned idle_ms = 20, quiet_since = 0, sleep_s = 0, dg_prev = dg.msgs;
+ 	(void)PE_parse_boot_argn("sweetmdmidle", &idle_ms, sizeof(idle_ms));
++	(void)PE_parse_boot_argn("sweetmdmsleep", &sleep_s, sizeof(sleep_s));
++	bzero(&mds, sizeof(mds));
++	uint64_t mds_t0 = mach_absolute_time();
+ 	uint32_t act_prev[6] = { 0 };
+ 	for (unsigned t = 0; (secs == 0 || t < secs * 1000u) && !mx.gone && !(mq.restart_wanted && maxr0);) {
+ 		uint64_t ns;
+@@ -3921,6 +4012,14 @@ md_mission(void)
+ 			mx_sfr_print("shutting down");
+ 		}
+ 		md_link_sample();
++		if (mds.m3 && md_gpio_in(WAKE2_PIN) != mds.wake0) {
++			md_m3_exit(MDS_WAKE);
++			quiet_since = t;
++		}
++		if (mds.m3 && pd.count != 0) {
++			md_m3_exit(MDS_OUT);
++			quiet_since = t;
++		}
+ 		mx_er0();
+ 		mx_er1();
+ 		while (mx_rxq_head != mx_rxq_tail) {
+@@ -3939,6 +4038,17 @@ md_mission(void)
+ 			printf("SWEET MDM: link: %u%% L1, %u%% L0, %u other of %u samples (aspm %u, idle poll %u ms)\n", l1, l0,
+ 			    mdl.other, mdl.samples, md_aspm_level, idle_ms);
+ 			bzero(&mdl, sizeof(mdl));
++			uint64_t span = mach_absolute_time() - mds_t0, in3 = mds.total + (mds.m3 ? mach_absolute_time() - mds.since : 0);
++			printf("SWEET MDM: power: %u DIAG messages this minute; M3 %u%% of the time (sweetmdmsleep %u s): %u entries, "
++			    "out by wake pin %u / doorbell %u / output %u, %u failures\n", dg.msgs - dg_prev,
++			    span ? (unsigned)(in3 * 100 / span) : 0, sleep_s, mds.enters, mds.ex_wake, mds.ex_db, mds.ex_out, mds.fails);
++			dg_prev = dg.msgs;
++			mds_t0 = mach_absolute_time();
++			mds.total = 0;
++			if (mds.m3) {
++				mds.since = mds_t0;
++			}
++			mds.enters = mds.ex_wake = mds.ex_db = mds.ex_out = 0;
+ 			printf("SWEET MDM: QRTR %u s: %u hellos, %u services, %u data; mhistatus %#x mdm2ap status %u errfatal %u; %s\n",
+ 			    t / 1000, mq.hellos, mq.servers, mq.data, md_rd(md.bar0, MHI_STATUS), md_gpio_in(MDM2AP_STATUS),
+ 			    md_gpio_in(MDM2AP_ERRFATAL), sweet_cell);
+@@ -3955,6 +4065,9 @@ md_mission(void)
+ 			memcpy(act_prev, act, sizeof(act));
+ 			quiet_since = t;
+ 		}
++		if (sleep_s != 0 && md.stage >= 9 && t > 120000 && !mds.m3 && mq.reg == 1 && t - quiet_since >= sleep_s * 1000u) {
++			md_m3_enter();
++		}
+ 		if (md.stage >= 9 && t > 60000) {
+ 			md_wait(t - quiet_since >= 1000 && idle_ms > 2 ? idle_ms : 2);  /* service mode: sleep between polls */
+ 		} else {
+-- 
+2.54.0 (Apple Git-157)
+
