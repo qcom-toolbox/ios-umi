@@ -296,7 +296,18 @@
     IOSurfaceIncrementUseCount()s every surface a command buffer uses at commit and decrements at completion / failure
     (diff `phone/metal2/frontend-iosurface-usecount.diff`, build `out-usecount`, sha256 aaa562ce...; previous plugin
     38651f4e... as `SweetMetal2.sweet-pre-usecount` on the phone and in the backup dir; mtl2-env
-    `SWEET_MTL2_NO_USECOUNT=1` = off). Not yet checked.
+    `SWEET_MTL2_NO_USECOUNT=1` = off). **Booted: still glitchy (user)** - kept on the phone (harmless, matches Apple's
+    driver), but not the cause.
+  - Drawable retire: on that boot 94 of 410 released drawables still had the CTL flush bits set at the 3-tick release
+    (colour-flush boot: 4 of 259). `shim/out/umi-0307b-retire6.img` (0307b + `sweetfb_retire=6`, `sweettop=10` dropped
+    for the 607-char limit): **still glitchy**, and 93 of 626 still had the bits set after 6 ticks (100 ms) - the bit is
+    probably not a reliable "latched" signal on this command-mode panel. Not the cause either.
+  - **Open (UI glitches on home / lock / app switcher):** ruled out so far - detached layers (fixed separately), gain map
+    (fixed separately), CPU (crash loop fixed), dirty regions, IOSurface use counts, drawable retire time. Known: under
+    CA_COLOR_FLUSH the UI shows no glitch at the same ~9 fps. The idle home screen redraws at a steady 10 fps with ~22 ms
+    of GPU time per frame (100 submits / 10 s). Next: a frame-by-frame look at a video of the glitch now; time each
+    present against GPU completion and the panel's refresh in the kernel log; find what in CoreAnimation's colour-flush
+    path changes the ordering (it encodes and flushes an extra pass and waits before the real frame).
 
 - **2026-11-15 15:50: crash loop = speech synthesizer extensions without a container path; 0307** (patch
   `xnu/patches/0307-umi-sandbox-appex-container.patch`, kernel a05e6a8 on top of 0305 (0306 reverted), image
