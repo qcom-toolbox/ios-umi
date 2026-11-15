@@ -293,6 +293,10 @@
     wait list of up to 16); the list is let go when the bits clear, or after 60 ticks (1 s). Logged on the
     "drawables released" line: "N held until the flip latched, M released after 1 s or overflow".
     `sweetfb_latchwait=0` = old behaviour.
+  - **Booted: "a lil better", left mainly on the home screen, a little on the lock screen** (user). 120 of 758 releases
+    held until the latch, none forced. Remaining: the idle home screen redraws at a steady 10.0 fps (~21 ms GPU each);
+    under CA_COLOR_FLUSH the only area flashing there was a small square at the top left of the status bar. Asked the
+    status-bar session whether its change updates at 10 Hz.
 
 - **2026-11-15 20:00: home / lock screen / app switcher glitches: not dirty regions; SweetMetal2 now marks IOSurfaces in
   use while the GPU works** (phone files changed, user OK'd; kernel 0307b).
