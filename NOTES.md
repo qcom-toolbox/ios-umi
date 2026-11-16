@@ -283,6 +283,26 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-16 22:30: HEAT - the user was right, the LTE radio heats the phone: weak signal, full transmit power**
+  (patch `xnu/patches/0316-umi-x55-radio-heat-measure-tmd.patch`, kernel 88eaed7 on top of 0315; images
+  `shim/out/umi-0316-radio-ab.img` (sweetmdmrc=10), `umi-0317-pa-tmd.img`, `umi-0318-tmd-test.img` (sweetmdmtmdt=4),
+  all booted; **`shim/out/umi-0319-rf-diag.img`** = 0313's line, built, not booted).
+  - New measurements (per minute): the modem's own thermistors through QMI TS (service 0x17: pa, pa_1, xo_therm,
+    sys_therm1/2, modem_tsens/1; qfe_* read -273 = not fitted), NAS Tx/Rx info (0x5a: in traffic, tx power, both
+    rx chains), signal info (0x4f) and RF band (0x31), and the top uplink destinations ("SWEET MDM: uplink:").
+  - **Radio A/B in one boot (0316, 10 min each):** radio LOW POWER: modem die 59 -> 54-56 C, SoC cores flat
+    64-68 C. Radio ONLINE: modem die 56 -> 67 C, pa_1 50 -> 57, xo 47 -> 54, **cores 68 -> 77 C and the CPU caps
+    dropped** (1344 / 1382). Whenever in traffic the X55 sends at **24 dBm (its maximum): RSRP -121 to -129 dBm**.
+    Wi-Fi was not joined that boot, so all of iOS's traffic (150-300 packets / min) went over LTE.
+  - **Throttling (QMI TMD, service 0x18, as Android's thermal-engine):** devices pa, pa_fr1, modem (max 3) and
+    others. Level test (0318, 4 min each): pa 1 / pa 2 / modem 1 still 24 dBm, no cooling; **pa 3 = detach**
+    (registration 3 "denied", no data: cool only because the radio stops). 0317's auto loop also climbed 1 -> 3 in
+    a minute (stale readings; fixed: one step per fresh reading, max sweetmdmtmdmax=2). So not a fix:
+    `sweetmdmtmd` is 0 (off) by default from 0319.
+  - User: data is "abysmally slow, max 44 kbps anywhere on fast.com". The data path shows no local drops and
+    unpacks QMAP aggregates; with RSRP ~-125 everywhere, suspect the RF side (one receive chain / antenna path not
+    working, or a wrong band) - 0319 logs both chains' tuning and receive power, RSSI / RSRQ / SNR and the band.
+
 - **2026-11-15 23:25: HEAT, booted 0314 + 0315 - the SoC itself is at 85-88 C with idle CPUs; modem side now quiet**
   (patch `xnu/patches/0315-umi-x55-mhi-m3-diag-off.patch`, kernel 593745c on top of 0314, images
   **`shim/out/umi-0315-mdm-m3.img`** = 0313's line - sweettop=10 + `sweetmdmsleep=5` (booted), and

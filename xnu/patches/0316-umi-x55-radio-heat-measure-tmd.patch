@@ -1,0 +1,530 @@
+From 88eaed7ec1a1b4f00a436ebcca0231776b434b1e Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 22:28:41 +0100
+Subject: [PATCH] umi: modem (0316-0319): measure the radio's heat - QMI TS
+ (modem thermistors live), NAS Tx/Rx info (traffic, tx power, both rx chains),
+ signal info and band; radio on/off cycle test (sweetmdmrc); QMI TMD PA /
+ modem mitigation (sweetmdmtmd, off by default) and level test (sweetmdmtmdt);
+ per-minute uplink destinations
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_mdm.c | 453 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 453 insertions(+)
+
+diff --git a/bsd/dev/sweet_mdm.c b/bsd/dev/sweet_mdm.c
+index 82ecba8..6ea466a 100644
+--- a/bsd/dev/sweet_mdm.c
++++ b/bsd/dev/sweet_mdm.c
+@@ -3347,6 +3347,79 @@ pd_ns(const uint8_t *p, unsigned n)
+ }
+ 
+ /* the stack's queued packets to the modem (from the modem thread) */
++/*
++ * 0319: who keeps the radio busy. Every packet sent over pdp_ip0 is counted by destination (IPv4 address,
++ * protocol, port); the top ones are printed each minute (SWEET MDM: uplink: ...) and the table cleared.
++ */
++#define PDT_N 24u
++static struct {
++	uint32_t addr, pkts, bytes;
++	uint16_t port;
++	uint8_t proto;
++} pdt[PDT_N];
++static uint32_t pdt_other;
++
++static void
++pdt_count(const uint8_t *b, unsigned n)
++{
++	if (n < 20 || (b[0] >> 4) != 4) {
++		pdt_other++;
++		return;
++	}
++	unsigned hl = (b[0] & 0xfu) * 4u, proto = b[9];
++	uint32_t a = (uint32_t)b[16] << 24 | (uint32_t)b[17] << 16 | (uint32_t)b[18] << 8 | b[19];
++	uint16_t port = (proto == 6 || proto == 17) && n >= hl + 4 ? (uint16_t)(b[hl + 2] << 8 | b[hl + 3]) : 0;
++	unsigned freei = PDT_N;
++	for (unsigned i = 0; i < PDT_N; ++i) {
++		if (pdt[i].pkts && pdt[i].addr == a && pdt[i].port == port && pdt[i].proto == proto) {
++			pdt[i].pkts++;
++			pdt[i].bytes += n;
++			return;
++		}
++		if (!pdt[i].pkts && freei == PDT_N) {
++			freei = i;
++		}
++	}
++	if (freei == PDT_N) {
++		pdt_other++;
++		return;
++	}
++	pdt[freei].addr = a;
++	pdt[freei].port = port;
++	pdt[freei].proto = (uint8_t)proto;
++	pdt[freei].pkts = 1;
++	pdt[freei].bytes = n;
++}
++
++static void
++pdt_print(void)
++{
++	char line[420];
++	int at = 0;
++	for (unsigned k = 0; k < 8; ++k) {
++		unsigned best = PDT_N;
++		for (unsigned i = 0; i < PDT_N; ++i) {
++			if (pdt[i].pkts && (best == PDT_N || pdt[i].pkts > pdt[best].pkts)) {
++				best = i;
++			}
++		}
++		if (best == PDT_N) {
++			break;
++		}
++		uint32_t a = pdt[best].addr;
++		at += snprintf(line + at, sizeof(line) - (size_t)at, " %u.%u.%u.%u:%u/%s %u pk %u B;", a >> 24, (a >> 16) & 0xff,
++		    (a >> 8) & 0xff, a & 0xff, pdt[best].port, pdt[best].proto == 6 ? "tcp" : pdt[best].proto == 17 ? "udp" : "ip",
++		    pdt[best].pkts, pdt[best].bytes);
++		pdt[best].pkts = 0;
++		if (at >= (int)sizeof(line) - 60) {
++			break;
++		}
++	}
++	printf("SWEET MDM: uplink:%s other %u\n", at ? line : " nothing", pdt_other);
++	bzero(pdt, sizeof(pdt));
++	pdt_other = 0;
++}
++
+ static void
+ pd_drain(void)
+ {
+@@ -3366,6 +3439,7 @@ pd_drain(void)
+ 			ifnet_stat_increment_out(pd.ifp, 1, (u_int32_t)n, 0);
+ 		} else if (n <= sizeof(b) - 4 && mbuf_copydata(m, 0, n, b) == 0 && mx_data_send(b, (unsigned)n)) {
+ 			pd.out++;
++			pdt_count(b, (unsigned)n);
+ 			ifnet_stat_increment_out(pd.ifp, 1, (u_int32_t)n, 0);
+ 		} else {
+ 			ifnet_stat_increment_out(pd.ifp, 0, 0, 1);
+@@ -3562,6 +3636,350 @@ mx_data_poll(unsigned t_ms)
+ 	}
+ }
+ 
++/*
++ * 0316: what the radio does to the heat, measured. (1) QMI TS (thermal sensors, service 0x17, as msm-4.19
++ * qmi_sensors.c): the sensor list once (0x20), then every 60 s a "current temperature" registration per sensor
++ * (0x21, send_current_temp_report 1) whose answer comes as a TEMP_REPORT indication (0x22, TLV 0x10 float):
++ * the modem's PA / XO thermistors live, not only the one reading at its boot. (2) NAS get Tx Rx info (0x5a, LTE)
++ * every poll: in traffic (RRC connected) or not, and the transmit power. Printed with the minute's status lines.
++ */
++#define MTH_N 16u
++static struct {
++	unsigned n, rounds, polls, traffic;
++	bool listed, fresh;             /* fresh: a temperature report came since the TMD loop last looked */
++	char name[MTH_N][34];
++	int t10[MTH_N];                 /* tenths of a degree C, INT32_MIN = none yet */
++	int tx10_max, tx10_last;        /* transmit power, tenths of a dBm */
++	int rsrp10;
++	/* 0319: RF health - both receive chains (Tx Rx info TLV 0x10 / 0x11), LTE signal info, band */
++	int ch_tuned[2], ch_rx10[2], ch_rsrp10[2];
++	int lte_rssi, lte_rsrq, lte_rsrp, lte_snr10;
++	unsigned band, earfcn;
++} mth;
++
++/*
++ * 0317: thermal mitigation of the radio, as Android's thermal-engine does it through QMI TMD (thermal mitigation
++ * devices, service 0x18, msm-4.19 qmi_cooling.c): the device list once (0x20: TLV 0x10 = count, then per device
++ * a length-prefixed name and its max level), then levels set with 0x21 (TLV 0x01 name, TLV 0x02 level). The
++ * 0316 test (umi-0316-radio-ab): at RSRP -125 dBm the X55 transmits at 24 dBm (its maximum) whenever iOS sends;
++ * radio online the modem went 56 -> 63 C in 5 min, radio in low power 59 -> 54 C. Nothing on this port told the
++ * modem to back off, so its PA ran unlimited. Loop (every 30 s poll): the hottest PA thermistor (TS sensors
++ * named pa*, not qfe*) at or over sweetmdmtmd C (default 50; 0 = off) -> every device named pa* or "modem" one
++ * level up (to its max); 5 C under -> one level down. 0319: default 0 (off): the 0318 test showed pa 1 / 2 keep 24 dBm and pa 3 detaches.
++ */
++#define TMD_N 16u
++static struct {
++	unsigned n;
++	bool listed;
++	char name[TMD_N][34];
++	uint8_t max[TMD_N], level[TMD_N];
++} tmd;
++
++static bool
++tmd_ours(const char *n)
++{
++	return (n[0] == 'p' && n[1] == 'a') || strcmp(n, "modem") == 0;
++}
++
++static void
++tmd_set(unsigned i, unsigned level)
++{
++	uint8_t r[48];
++	size_t l = strnlen(tmd.name[i], 32);
++	r[0] = 0x01;
++	r[1] = (uint8_t)(l + 1);
++	r[2] = 0;
++	r[3] = (uint8_t)l;
++	memcpy(r + 4, tmd.name[i], l);
++	r[4 + l] = 0x02;
++	r[5 + l] = 1;
++	r[6 + l] = 0;
++	r[7 + l] = (uint8_t)level;
++	tmd.level[i] = (uint8_t)level;
++	mx_qmi_req(0x18, 0x21, r, (uint16_t)(8 + l));
++}
++
++static int
++mth_f10(uint32_t b)
++{
++	unsigned ex = (b >> 23) & 0xffu;
++	if (ex == 0) {
++		return 0;
++	}
++	int sh = (int)ex - 127 - 23;
++	int64_t v = (int64_t)((b & 0x7fffffu) | 0x800000u) * 10;
++	v = sh >= 0 ? (sh < 20 ? v << sh : INT32_MAX) : (sh > -40 ? v >> -sh : 0);
++	return (int)((b >> 31) ? -v : v);
++}
++
++static uint32_t
++mth_u32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++static void
++mth_poll(unsigned t_ms)
++{
++	static unsigned next_ts;
++	if (mq.svc_port[0x03] != 0) {
++		static const uint8_t lte[4] = { 0x01, 0x01, 0x00, 0x08 };
++		mx_qmi_req(0x03, 0x5a, lte, 4);
++		mx_qmi_req(0x03, 0x4f, NULL, 0);        /* get signal info */
++		mx_qmi_req(0x03, 0x31, NULL, 0);        /* get RF band info */
++	}
++	unsigned thr = 0, lmax = 2, tstep = 0;      /* 0319: off by default - pa 1 / 2 did not lower the tx power, pa 3 = detach */
++	(void)PE_parse_boot_argn("sweetmdmtmd", &thr, sizeof(thr));
++	(void)PE_parse_boot_argn("sweetmdmtmdmax", &lmax, sizeof(lmax));
++	(void)PE_parse_boot_argn("sweetmdmtmdt", &tstep, sizeof(tstep));
++	if (tstep != 0 && mq.svc_port[0x18] != 0 && !tmd.listed) {
++		mx_qmi_req(0x18, 0x20, NULL, 0);
++	} else if (tstep != 0 && mq.svc_port[0x18] != 0 && tmd.listed && t_ms > 240000) {
++		/*
++		 * 0318 level test: tstep minutes per step, from 4 min into the run: none, pa 1, pa 2, pa 3, modem 1,
++		 * modem 2, none, ... (the other devices stay at 0). What each costs: tx power, traffic, registration.
++		 */
++		static const char *const dn[] = { "", "pa", "pa", "pa", "modem", "modem" };
++		static const uint8_t dl[] = { 0, 1, 2, 3, 1, 2 };
++		static unsigned last = ~0u;
++		unsigned k = (t_ms - 240000) / (tstep * 60000u) % 6u;
++		if (k != last) {
++			last = k;
++			printf("SWEET MDM: TMD test: step %u: %s %u for %u min\n", k, k ? dn[k] : "none", dl[k], tstep);
++			for (unsigned i = 0; i < tmd.n; ++i) {
++				unsigned want = strcmp(tmd.name[i], dn[k]) == 0 ? dl[k] : 0;
++				if (want != tmd.level[i] || tmd_ours(tmd.name[i])) {
++					tmd_set(i, want);
++				}
++			}
++		}
++	} else if (thr != 0 && mq.svc_port[0x18] != 0) {
++		if (!tmd.listed) {
++			mx_qmi_req(0x18, 0x20, NULL, 0);
++		} else if (mth.fresh) {
++			mth.fresh = false;
++			int hot = INT32_MIN;
++			for (unsigned i = 0; i < mth.n; ++i) {
++				if (mth.name[i][0] == 'p' && mth.name[i][1] == 'a' && mth.t10[i] != INT32_MIN && mth.t10[i] > hot) {
++					hot = mth.t10[i];
++				}
++			}
++			for (unsigned i = 0; hot != INT32_MIN && i < tmd.n; ++i) {
++				if (!tmd_ours(tmd.name[i])) {
++					continue;
++				}
++				if (hot >= (int)thr * 10 && tmd.level[i] < MIN((unsigned)tmd.max[i], lmax)) {
++					tmd_set(i, tmd.level[i] + 1u);
++				} else if (hot <= ((int)thr - 5) * 10 && tmd.level[i] > 0) {
++					tmd_set(i, tmd.level[i] - 1u);
++				}
++			}
++		}
++	}
++	if (mq.svc_port[0x17] == 0 || t_ms < next_ts) {
++		return;
++	}
++	next_ts = t_ms + 60000;
++	if (!mth.listed) {
++		mx_qmi_req(0x17, 0x20, NULL, 0);
++		return;
++	}
++	for (unsigned i = 0; i < mth.n; ++i) {
++		uint8_t r[48];
++		size_t l = strnlen(mth.name[i], 32);
++		r[0] = 0x01;
++		r[1] = (uint8_t)(l + 1);
++		r[2] = 0;
++		r[3] = (uint8_t)l;
++		memcpy(r + 4, mth.name[i], l);
++		r[4 + l] = 0x02;
++		r[5 + l] = 1;
++		r[6 + l] = 0;
++		r[7 + l] = 1;
++		mx_qmi_req(0x17, 0x21, r, (uint16_t)(8 + l));
++	}
++	mth.rounds++;
++}
++
++/* true: handled (a TS / NAS Tx-Rx message) */
++static bool
++mth_rx(unsigned type, uint32_t svc, unsigned msg, const uint8_t *m, uint32_t len)
++{
++	uint16_t tl = 0;
++	const uint8_t *v;
++	if (svc == 0x17 && type == 2 && msg == 0x20) {
++		v = mx_tlv(m, len, 0x10, &tl);
++		if (v == NULL || tl < 1) {
++			printf("SWEET MDM: TS: sensor list: no list TLV (%u bytes)\n", len);
++			mth.listed = true;
++			return true;
++		}
++		unsigned cnt = v[0], o = 1;
++		mth.n = 0;
++		for (unsigned i = 0; i < cnt && o < tl && mth.n < MTH_N; ++i) {
++			unsigned sl = v[o];
++			if (o + 1 + sl > tl || sl > 32) {
++				break;
++			}
++			memcpy(mth.name[mth.n], v + o + 1, sl);
++			mth.name[mth.n][sl] = 0;
++			mth.t10[mth.n] = INT32_MIN;
++			mth.n++;
++			o += 1 + sl;
++		}
++		mth.listed = true;
++		char names[300];
++		int at = 0;
++		for (unsigned i = 0; i < mth.n && at < (int)sizeof(names) - 40; ++i) {
++			at += snprintf(names + at, sizeof(names) - (size_t)at, "%s%s", i ? " " : "", mth.name[i]);
++		}
++		printf("SWEET MDM: TS: %u of %u sensors (TLV %u bytes, first %02x %02x %02x %02x): %s\n", mth.n, cnt, tl,
++		    v[0], tl > 1 ? v[1] : 0, tl > 2 ? v[2] : 0, tl > 3 ? v[3] : 0, at ? names : "-");
++		return true;
++	}
++	if (svc == 0x18 && type == 2 && msg == 0x20) {
++		v = mx_tlv(m, len, 0x10, &tl);
++		tmd.listed = true;
++		tmd.n = 0;
++		if (v != NULL && tl >= 1) {
++			unsigned cnt = v[0], o = 1;
++			for (unsigned i = 0; i < cnt && o < tl && tmd.n < TMD_N; ++i) {
++				unsigned sl = v[o];
++				if (o + 2 + sl > tl || sl > 32) {
++					break;
++				}
++				memcpy(tmd.name[tmd.n], v + o + 1, sl);
++				tmd.name[tmd.n][sl] = 0;
++				tmd.max[tmd.n] = v[o + 1 + sl];
++				tmd.level[tmd.n] = 0;
++				tmd.n++;
++				o += 2 + sl;
++			}
++		}
++		char names[400];
++		int at = 0;
++		for (unsigned i = 0; i < tmd.n && at < (int)sizeof(names) - 48; ++i) {
++			at += snprintf(names + at, sizeof(names) - (size_t)at, " %s(max %u)%s", tmd.name[i], tmd.max[i],
++			    tmd_ours(tmd.name[i]) ? "*" : "");
++		}
++		printf("SWEET MDM: TMD: %u mitigation devices (* = steered by PA temperature):%s\n", tmd.n, at ? names : " -");
++		return true;
++	}
++	if (svc == 0x18 && type == 2 && msg == 0x21) {
++		v = mx_tlv(m, len, 0x02, &tl);
++		static unsigned bad;
++		if (v != NULL && tl >= 4 && (v[0] | v[1] << 8) != 0 && bad++ < 5) {
++			printf("SWEET MDM: TMD: set level -> result %u error %#x\n", v[0] | v[1] << 8, v[2] | v[3] << 8);
++		}
++		return true;
++	}
++	if (svc == 0x17 && type == 2 && msg == 0x21) {
++		v = mx_tlv(m, len, 0x02, &tl);
++		static unsigned bad;
++		if (v != NULL && tl >= 4 && (v[0] | v[1] << 8) != 0 && bad++ < 5) {
++			printf("SWEET MDM: TS: register -> result %u error %#x\n", v[0] | v[1] << 8, v[2] | v[3] << 8);
++		}
++		return true;
++	}
++	if (svc == 0x17 && type == 4 && msg == 0x22) {
++		const uint8_t *id = mx_tlv(m, len, 0x01, &tl);
++		uint16_t tl2 = 0;
++		const uint8_t *tv = mx_tlv(m, len, 0x10, &tl2);
++		if (id == NULL || tl < 1 || tv == NULL || tl2 < 4) {
++			return true;
++		}
++		unsigned sl = MIN((unsigned)id[0], (unsigned)tl - 1);
++		for (unsigned i = 0; i < mth.n; ++i) {
++			if (strlen(mth.name[i]) == sl && memcmp(mth.name[i], id + 1, sl) == 0) {
++				mth.t10[i] = mth_f10(mth_u32(tv));
++				mth.fresh = true;
++			}
++		}
++		return true;
++	}
++	if (svc == 0x03 && type == 2 && msg == 0x5a) {
++		mth.polls++;
++		v = mx_tlv(m, len, 0x12, &tl);
++		if (v != NULL && tl >= 5) {
++			if (v[0]) {
++				int p = (int)mth_u32(v + 1);
++				mth.traffic++;
++				mth.tx10_last = p;
++				if (p > mth.tx10_max) {
++					mth.tx10_max = p;
++				}
++			}
++		}
++		for (unsigned c = 0; c < 2; ++c) {
++			v = mx_tlv(m, len, (uint8_t)(0x10 + c), &tl);
++			if (v != NULL && tl >= 17) {
++				mth.ch_tuned[c] = v[0];
++				mth.ch_rx10[c] = (int)mth_u32(v + 1);
++				mth.ch_rsrp10[c] = (int)mth_u32(v + 13);
++			} else {
++				mth.ch_tuned[c] = -1;
++			}
++		}
++		mth.rsrp10 = mth.ch_rsrp10[0];
++		return true;
++	}
++	if (svc == 0x03 && type == 2 && msg == 0x4f) {
++		v = mx_tlv(m, len, 0x14, &tl);
++		if (v != NULL && tl >= 6) {
++			mth.lte_rssi = (int8_t)v[0];
++			mth.lte_rsrq = (int8_t)v[1];
++			mth.lte_rsrp = (int16_t)(v[2] | v[3] << 8);
++			mth.lte_snr10 = (int16_t)(v[4] | v[5] << 8);
++		}
++		return true;
++	}
++	if (svc == 0x03 && type == 2 && msg == 0x31) {
++		v = mx_tlv(m, len, 0x01, &tl);
++		if (v != NULL && tl >= 6 && v[0] >= 1) {
++			mth.band = (unsigned)(v[2] | v[3] << 8);
++			mth.earfcn = (unsigned)(v[4] | v[5] << 8);
++		}
++		return true;
++	}
++	return false;
++}
++
++static void
++mth_print(void)
++{
++	char line[400];
++	int at = 0;
++	for (unsigned i = 0; i < mth.n && at < (int)sizeof(line) - 48; ++i) {
++		int t = mth.t10[i];
++		if (t == INT32_MIN) {
++			at += snprintf(line + at, sizeof(line) - (size_t)at, " %s ?", mth.name[i]);
++		} else {
++			at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %s%d.%d", mth.name[i], t < 0 ? "-" : "",
++			    (t < 0 ? -t : t) / 10, (t < 0 ? -t : t) % 10);
++		}
++	}
++	printf("SWEET MDM: modem temps:%s\n", at ? line : " (none yet)");
++	printf("SWEET MDM: radio: reg %u, opmode %u, LTE in traffic %u of %u polls, tx power last %d.%d max %d.%d dBm, rsrp %d dBm\n",
++	    mq.reg, mq.opmode, mth.traffic, mth.polls, mth.tx10_last / 10, (mth.tx10_last < 0 ? -mth.tx10_last : mth.tx10_last) % 10,
++	    mth.tx10_max / 10, (mth.tx10_max < 0 ? -mth.tx10_max : mth.tx10_max) % 10, mth.rsrp10 / 10);
++	printf("SWEET MDM: rf: band %u earfcn %u; LTE rssi %d rsrq %d rsrp %d dBm snr %d.%d dB; rx chain 0 tuned %d power %d rsrp %d, "
++	    "chain 1 tuned %d power %d rsrp %d (dBm)\n", mth.band, mth.earfcn, mth.lte_rssi, mth.lte_rsrq, mth.lte_rsrp,
++	    mth.lte_snr10 / 10, (mth.lte_snr10 < 0 ? -mth.lte_snr10 : mth.lte_snr10) % 10, mth.ch_tuned[0], mth.ch_rx10[0] / 10,
++	    mth.ch_rsrp10[0] / 10, mth.ch_tuned[1], mth.ch_rx10[1] / 10, mth.ch_rsrp10[1] / 10);
++	mth.traffic = mth.polls = 0;
++	mth.tx10_max = -1000;
++	char lv[200];
++	int lat = 0;
++	for (unsigned i = 0; i < tmd.n && lat < (int)sizeof(lv) - 40; ++i) {
++		if (tmd_ours(tmd.name[i])) {
++			lat += snprintf(lv + lat, sizeof(lv) - (size_t)lat, " %s %u/%u", tmd.name[i], tmd.level[i], tmd.max[i]);
++		}
++	}
++	if (tmd.listed) {
++		printf("SWEET MDM: TMD levels:%s\n", lat ? lv : " (no pa / modem device)");
++	}
++}
++
+ static void
+ mx_qmi_rx(uint32_t node, uint32_t port, const uint8_t *m, uint32_t len)
+ {
+@@ -3582,6 +4000,9 @@ mx_qmi_rx(uint32_t node, uint32_t port, const uint8_t *m, uint32_t len)
+ 	if (mx_data_rx(svc, msg, m, len, res, err)) {
+ 		return;
+ 	}
++	if (mth_rx(type, svc, msg, m, len)) {
++		return;
++	}
+ 	if (type == 4 && svc == 0x0b && msg == 0x32) {
+ 		const uint8_t *cv = mx_tlv(m, len, 0x10, &tl);
+ 		printf("SWEET MDM: UIM card status INDICATION\n");
+@@ -3693,6 +4114,30 @@ mx_mode_steer(unsigned t_ms)
+ 	if (!online || mq.svc_port[0x02] == 0) {
+ 		return;
+ 	}
++	/*
++	 * 0316: sweetmdmrc=N (minutes): from 4 min into the modem's run, N minutes of radio in LOW POWER (RF off,
++	 * the modem itself still runs), N minutes ONLINE, and so on: the radio's share of the heat within one boot.
++	 */
++	unsigned cyc = 0;
++	(void)PE_parse_boot_argn("sweetmdmrc", &cyc, sizeof(cyc));
++	if (cyc != 0 && mq.lpm_sent && t_ms > 240000) {
++		static unsigned last_phase = ~0u;
++		unsigned k = (t_ms - 240000) / (cyc * 60000u);
++		if (k != last_phase) {
++			last_phase = k;
++			printf("SWEET MDM: radio test: phase %u, radio %s for %u min\n", k, (k & 1) ? "ONLINE" : "LOW POWER", cyc);
++			mq.next_online = 0;
++		}
++		if ((k & 1) == 0) {
++			if (mq.opmode != 1 && t_ms >= mq.next_online) {
++				static const uint8_t lp[4] = { 0x01, 0x01, 0x00, 0x01 };
++				mq.next_online = t_ms + 10000;
++				mx_qmi_req(0x02, 0x2e, lp, 4);
++				mx_qmi_req(0x02, 0x2d, NULL, 0);
++			}
++			return;
++		}
++	}
+ 	if (!mq.lpm_sent) {
+ 		static const uint8_t lpm[4] = { 0x01, 0x01, 0x00, 0x01 };    /* TLV 1: mode 1 = low power */
+ 		mq.lpm_sent = true;
+@@ -3806,6 +4251,9 @@ mx_qmi_survey(unsigned t_ms)
+ 		mx_qmi_req(0x03, 0x24, NULL, 0);
+ 		mx_qmi_req(0x03, 0x20, NULL, 0);
+ 		mx_qmi_req(0x02, 0x2d, NULL, 0);
++		if (md.stage >= 9) {
++			mth_poll(t_ms);
++		}
+ 		if (md.stage < 9 || t_ms >= mq.next_uim) {
+ 			mq.next_uim = t_ms + 60000;
+ 			mx_qmi_req(0x0b, 0x2f, NULL, 0);
+@@ -4001,6 +4449,7 @@ md_mission(void)
+ 	(void)PE_parse_boot_argn("sweetmdmidle", &idle_ms, sizeof(idle_ms));
+ 	(void)PE_parse_boot_argn("sweetmdmsleep", &sleep_s, sizeof(sleep_s));
+ 	bzero(&mds, sizeof(mds));
++	mth.tx10_max = -1000;
+ 	uint64_t mds_t0 = mach_absolute_time();
+ 	uint32_t act_prev[6] = { 0 };
+ 	for (unsigned t = 0; (secs == 0 || t < secs * 1000u) && !mx.gone && !(mq.restart_wanted && maxr0);) {
+@@ -4043,6 +4492,10 @@ md_mission(void)
+ 			    "out by wake pin %u / doorbell %u / output %u, %u failures\n", dg.msgs - dg_prev,
+ 			    span ? (unsigned)(in3 * 100 / span) : 0, sleep_s, mds.enters, mds.ex_wake, mds.ex_db, mds.ex_out, mds.fails);
+ 			dg_prev = dg.msgs;
++			if (md.stage >= 9) {
++				mth_print();
++				pdt_print();
++			}
+ 			mds_t0 = mach_absolute_time();
+ 			mds.total = 0;
+ 			if (mds.m3) {
+-- 
+2.54.0 (Apple Git-157)
+
