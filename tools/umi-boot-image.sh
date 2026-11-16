@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 # The boot that reaches the iOS lock screen with touch and keys (NOTES.md, umi section).
 cmdline='debug=0xc serial=3 cpus=8 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0'
 # UMI_QUIET=1: a daily image with the least logging - no serial console, no kprintf mirroring / spam
-[ "${UMI_QUIET:-0}" = 1 ] && cmdline='debug=0x4 cpus=8 keepsyms=1 -noprogress rd=ufsroot0'
+[ "${UMI_QUIET:-0}" = 1 ] && cmdline='debug=0x4 cpus=8 -noprogress rd=ufsroot0'
 cmdline+=' unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1'
 cmdline+=' launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweetfb_direct=1'
 cmdline+=" ${*:-sweetusb=0}"
