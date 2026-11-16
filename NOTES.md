@@ -283,6 +283,19 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-16 23:55: `boot` FLASHED with the quiet daily image** (user: "In fastboot, flash it"):
+  `shim/out/umi-0322-quiet-flash.img` (SHA-256 e1cda5af75c2e524..., kernel 56b0fe4 = 0322) written to `boot` (A-only,
+  0x8000000) with `fastboot flash boot`, then `fastboot reboot`. Built with `UMI_QUIET=1 tools/umi-boot-image.sh`
+  (base `debug=0x4 cpus=8 -noprogress rd=ufsroot0`: no serial console, no kprintf spam, no keepsyms) + 0313's extras
+  without sweettop + `sweetusblog=0` (no UDP live log; USB networking / file server still up) `sweetmdmdiag=0`
+  (no modem DIAG at all) `sweetmdmsleep=5` (MHI M3 when quiet) `sweetgpuhold=0` (the GPU's colour test bars only
+  flash, no 10 s holds). GPU at 587 MHz (sweetgpuspeed=5). A test boot of the same line (with the holds) reached
+  iOS (user: "it boots allright"). Restore stock: `fastboot flash boot ~/ios-umi-backup/boot-read-2026-10-21.img`;
+  `fastboot boot` still works for test images.
+  - Low-band test (umi-0322-lowband, sweetmb=0x80080): inconclusive - the modem was back on band 3 (EARFCN 1850)
+    after its 3-min "not registered" reset; the band TLVs were asked before the modem had loaded its config (all
+    zeros). Next: ask again once registered, and keep the preference across the reset.
+
 - **2026-11-16 23:35: LTE - both receive chains fine, but the modem only ever uses bands 1 / 3 / 7, never 20 / 8**
   (patch `xnu/patches/0320-umi-x55-lte-bands-cells.patch`, kernel 56b0fe4; images `umi-0319-rf-diag.img`,
   `umi-0320-cells.img`, `umi-0321-bands.img` booted; **`shim/out/umi-0322-lowband.img`** = 0313's line - sweettop +
