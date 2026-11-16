@@ -283,6 +283,20 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-16 23:35: LTE - both receive chains fine, but the modem only ever uses bands 1 / 3 / 7, never 20 / 8**
+  (patch `xnu/patches/0320-umi-x55-lte-bands-cells.patch`, kernel 56b0fe4; images `umi-0319-rf-diag.img`,
+  `umi-0320-cells.img`, `umi-0321-bands.img` booted; **`shim/out/umi-0322-lowband.img`** = 0313's line - sweettop +
+  `sweetmb=0x80080` (LTE bands 20 + 8 only), built, not booted).
+  - 0319 RF: band 3 (EARFCN 1601 / 1850); both rx chains tuned, -84..-91 dBm each; RSRP -121..-130, RSRQ -13..-15,
+    **SNR -6..+1 dB** - the energy is there, the serving cell's share is small: slow data (user: max 44 kbps) and
+    24 dBm uplink. Uplink is mostly Apple services (17.x:443) - iOS syncing, nothing runaway.
+  - 0320 cells: serving band 3, other frequencies listed: EARFCN 50 (band 1, -128), 2850 (band 7, no cell), more band
+    3 (best -114). **No band 20 (6150-6449) or band 8 (3450-3799) ever** - Sunrise runs both; the modem's antenna
+    switch log only ever tuned B1 / B3 / B7 ports. HW config SR_DSDS-SDX55_Fusion, SW config ROW_Commercial.
+  - 0321: NAS 0x34 / DMS 0x45 band TLVs parsed as empty (my parsing or the extended TLV 0x23); 0322 dumps them raw.
+  - 0322 test: `sweetmb=MASK` = NAS set system selection preference TLV 0x15 (duration: until the modem restarts),
+    to see whether the phone finds a low-band cell and how much better it is.
+
 - **2026-11-16 22:30: HEAT - the user was right, the LTE radio heats the phone: weak signal, full transmit power**
   (patch `xnu/patches/0316-umi-x55-radio-heat-measure-tmd.patch`, kernel 88eaed7 on top of 0315; images
   `shim/out/umi-0316-radio-ab.img` (sweetmdmrc=10), `umi-0317-pa-tmd.img`, `umi-0318-tmd-test.img` (sweetmdmtmdt=4),

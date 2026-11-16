@@ -1,0 +1,168 @@
+From 56b0fe497c4f7a1feba6f9e54e564ad2ca0b6418 Mon Sep 17 00:00:00 2001
+From: qualcomm-toolbox <169756160+qcom-toolbox@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:28:53 +0100
+Subject: [PATCH] umi: modem (0320-0322): LTE neighbour cells (NAS 0x43), band
+ preference / capability TLVs dumped (NAS 0x34, DMS 0x45), sweetmb=MASK sets
+ the LTE band preference until the modem restarts (NAS 0x33)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bsd/dev/sweet_mdm.c | 135 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 135 insertions(+)
+
+diff --git a/bsd/dev/sweet_mdm.c b/bsd/dev/sweet_mdm.c
+index 6ea466a..566b7ce 100644
+--- a/bsd/dev/sweet_mdm.c
++++ b/bsd/dev/sweet_mdm.c
+@@ -3727,6 +3727,37 @@ mth_poll(unsigned t_ms)
+ 		mx_qmi_req(0x03, 0x5a, lte, 4);
+ 		mx_qmi_req(0x03, 0x4f, NULL, 0);        /* get signal info */
+ 		mx_qmi_req(0x03, 0x31, NULL, 0);        /* get RF band info */
++		mx_qmi_req(0x03, 0x43, NULL, 0);        /* 0320: get cell location info (LTE neighbours) */
++		/*
++		 * 0322: sweetmb=MASK (LTE bands, bit n-1 = band n, e.g. 0x80080 = bands 20 + 8): NAS set system selection
++		 * preference (0x33) TLV 0x15 LTE band preference, TLV 0x17 duration 0 = until the modem's next power cycle
++		 * (nothing kept). Sent once, then the preference is read back.
++		 */
++		static bool mb_sent;
++		uint64_t mb = 0;
++		(void)PE_parse_boot_argn("sweetmb", &mb, sizeof(mb));
++		if (mb != 0 && !mb_sent) {
++			uint8_t r[16];
++			mb_sent = true;
++			r[0] = 0x15;
++			r[1] = 8;
++			r[2] = 0;
++			for (unsigned i = 0; i < 8; ++i) {
++				r[3 + i] = (uint8_t)(mb >> (8 * i));
++			}
++			r[11] = 0x17;
++			r[12] = 1;
++			r[13] = 0;
++			r[14] = 0;
++			printf("SWEET MDM: rf: LTE band preference set to %#llx (sweetmb, until the modem restarts)\n", mb);
++			mx_qmi_req(0x03, 0x33, r, 15);
++		}
++		static bool pref_asked;
++		if (!pref_asked) {
++			pref_asked = true;
++			mx_qmi_req(0x03, 0x34, NULL, 0); /* 0320: get system selection preference (LTE bands allowed) */
++			mx_qmi_req(0x02, 0x45, NULL, 0); /* 0321: DMS get band capability (what the modem supports) */
++		}
+ 	}
+ 	unsigned thr = 0, lmax = 2, tstep = 0;      /* 0319: off by default - pa 1 / 2 did not lower the tx power, pa 3 = detach */
+ 	(void)PE_parse_boot_argn("sweetmdmtmd", &thr, sizeof(thr));
+@@ -3933,6 +3964,110 @@ mth_rx(unsigned type, uint32_t svc, unsigned msg, const uint8_t *m, uint32_t len
+ 		}
+ 		return true;
+ 	}
++	if ((svc == 0x03 && type == 2 && msg == 0x34) || (svc == 0x02 && type == 2 && msg == 0x45)) {
++		/* 0321: the TLVs of the answer (type:length) and the LTE band lists they hold */
++		char tl_s[200];
++		int at2 = 0;
++		for (uint32_t o = 7; o + 3 <= len && at2 < (int)sizeof(tl_s) - 12;) {
++			uint16_t l = (uint16_t)(m[o + 1] | m[o + 2] << 8);
++			at2 += snprintf(tl_s + at2, sizeof(tl_s) - (size_t)at2, " %#x:%u", m[o], l);
++			if (o + 3 + l > len) {
++				break;
++			}
++			o += 3u + l;
++		}
++		printf("SWEET MDM: rf: %s %#x answer TLVs:%s\n", svc == 0x02 ? "DMS" : "NAS", msg, tl_s);
++		/* 0322: the raw bytes of the band TLVs (NAS 0x12 / 0x15 / 0x23, DMS 0x01 / 0x10 / 0x11) */
++		static const uint8_t want_nas[] = { 0x12, 0x15, 0x23 }, want_dms[] = { 0x01, 0x10, 0x11 };
++		for (unsigned w = 0; w < 3; ++w) {
++			uint16_t wl = 0;
++			uint8_t id = svc == 0x02 ? want_dms[w] : want_nas[w];
++			const uint8_t *wv = mx_tlv(m, len, id, &wl);
++			if (wv == NULL) {
++				continue;
++			}
++			char hx[100];
++			int hat = 0;
++			for (unsigned i = 0; i < wl && i < 32; ++i) {
++				hat += snprintf(hx + hat, sizeof(hx) - (size_t)hat, "%02x", wv[i]);
++			}
++			printf("SWEET MDM: rf: %s %#x TLV %#x (%u bytes): %s\n", svc == 0x02 ? "DMS" : "NAS", msg, id, wl, hx);
++		}
++		if (svc == 0x02) {
++			uint16_t t10 = 0, t12 = 0;
++			const uint8_t *c10 = mx_tlv(m, len, 0x10, &t10), *c12 = mx_tlv(m, len, 0x12, &t12);
++			char bands[260];
++			int at = 0;
++			if (c12 != NULL && t12 >= 2) {
++				unsigned nb = (unsigned)(c12[0] | c12[1] << 8);
++				for (unsigned i = 0; i < nb && 2 + 2 * i + 1 < t12 && at < (int)sizeof(bands) - 6; ++i) {
++					at += snprintf(bands + at, sizeof(bands) - (size_t)at, " %u", (unsigned)(c12[2 + 2 * i] | c12[3 + 2 * i] << 8));
++				}
++			} else if (c10 != NULL && t10 >= 8) {
++				for (unsigned i = 0; i < 64 && at < (int)sizeof(bands) - 6; ++i) {
++					if (c10[i / 8] & (1u << (i % 8))) {
++						at += snprintf(bands + at, sizeof(bands) - (size_t)at, " %u", i + 1);
++					}
++				}
++			}
++			printf("SWEET MDM: rf: LTE bands the modem supports:%s\n", at ? bands : " (no TLV)");
++			return true;
++		}
++	}
++	if (svc == 0x03 && type == 2 && msg == 0x34) {
++		/* TLV 0x15: LTE band preference, u64 bit n-1 = band n; 0x14: mode preference; 0x24 (ext, 4 x u64) */
++		uint16_t t15 = 0, t14 = 0, t24 = 0;
++		const uint8_t *b15 = mx_tlv(m, len, 0x15, &t15), *b14 = mx_tlv(m, len, 0x14, &t14), *b24 = mx_tlv(m, len, 0x24, &t24);
++		char bands[200];
++		int at = 0;
++		const uint8_t *bm = b24 != NULL && t24 >= 32 ? b24 : b15;
++		unsigned nbits = b24 != NULL && t24 >= 32 ? 256u : (b15 != NULL && t15 >= 8 ? 64u : 0u);
++		for (unsigned i = 0; i < nbits && at < (int)sizeof(bands) - 6; ++i) {
++			if (bm[i / 8] & (1u << (i % 8))) {
++				at += snprintf(bands + at, sizeof(bands) - (size_t)at, " %u", i + 1);
++			}
++		}
++		printf("SWEET MDM: rf: LTE bands allowed:%s; mode preference %#x\n", at ? bands : " (no TLV)",
++		    b14 != NULL && t14 >= 2 ? (unsigned)(b14[0] | b14[1] << 8) : 0xffffu);
++		return true;
++	}
++	if (svc == 0x03 && type == 2 && msg == 0x43) {
++		/* TLV 0x13 LTE intra-frequency, 0x14 LTE inter-frequency (libqmi "Get Cell Location Info") */
++		char line[360];
++		int at = 0;
++		v = mx_tlv(m, len, 0x13, &tl);
++		if (v != NULL && tl >= 18) {
++			unsigned earfcn = (unsigned)(v[10] | v[11] << 8), sc = (unsigned)(v[12] | v[13] << 8), nc = v[18 - 0];
++			at += snprintf(line + at, sizeof(line) - (size_t)at, " serving earfcn %u pci %u idle %u, %u intra cells:", earfcn, sc,
++			    v[0], nc);
++			for (unsigned c = 0, o = 19; c < nc && o + 10 <= tl && at < 200; ++c, o += 10) {
++				at += snprintf(line + at, sizeof(line) - (size_t)at, " %u/%d", (unsigned)(v[o] | v[o + 1] << 8),
++				    (int16_t)(v[o + 4] | v[o + 5] << 8) / 10);
++			}
++		}
++		v = mx_tlv(m, len, 0x14, &tl);
++		if (v != NULL && tl >= 2) {
++			unsigned nf = v[1], o = 2;
++			at += snprintf(line + at, sizeof(line) - (size_t)at, "; %u other freqs:", nf);
++			for (unsigned f = 0; f < nf && o + 6 <= tl && at < (int)sizeof(line) - 40; ++f) {
++				unsigned ef = (unsigned)(v[o] | v[o + 1] << 8), nc = v[o + 5];
++				int best = -2000;
++				o += 6;
++				for (unsigned c = 0; c < nc && o + 10 <= tl; ++c, o += 10) {
++					int r = (int16_t)(v[o + 4] | v[o + 5] << 8);
++					if (r > best) {
++						best = r;
++					}
++				}
++				at += snprintf(line + at, sizeof(line) - (size_t)at, " earfcn %u best rsrp %d (%u cells);", ef, best / 10, nc);
++			}
++		}
++		static unsigned prints;
++		if (prints++ % 2 == 0) {
++			printf("SWEET MDM: cells:%s\n", at ? line : " (no LTE TLV)");
++		}
++		return true;
++	}
+ 	if (svc == 0x03 && type == 2 && msg == 0x31) {
+ 		v = mx_tlv(m, len, 0x01, &tl);
+ 		if (v != NULL && tl >= 6 && v[0] >= 1) {
+-- 
+2.54.0 (Apple Git-157)
+
