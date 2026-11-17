@@ -283,6 +283,28 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-17 20:35: after the reinstall - inverted colours / slow / status bar too high = compressed framebuffer;
+  SOS = MobileGestalt cache; 31 apps via migration again**
+  - User on the first boot with the restored files: GPU "completely broken": inverted colours, slow, glitchy;
+    status bar too high; SIM shows SOS only; apps and wallpapers missing.
+  - **Display:** backboardd's screen surfaces were `0x62336138` ('b3a8', **2 planes**, row 4544) instead of the old
+    install's `0x42475241` ('BGRA', 0 planes, row 4608) -> every present took the copy path ("direct 0, copy 282",
+    shape mismatch), read as BGRA: wrong colours, slow, cropped 1:1 instead of the 0296 scaler fit (status bar against
+    the top). Same kernel display code as the healthy 0316 boot; the MobileGestalt cache was byte-identical to the old
+    install's, so not that. QuartzCore (shared cache strings) has `CA_DISABLE_FRAMEBUFFER_COMPRESSION`: **added =1 to
+    backboardd's EnvironmentVariables** (launchd.plist pushed, read back; what made the old install pick BGRA without
+    it is not known). Other switches seen there: CA_DISABLE_OPAQUE_FRAMEBUFFER, CA_FORCE_FP16_FRAMEBUFFER,
+    CA_COLOR_FORMATS, CA_DISABLE_ACCELERATED_HDR.
+  - **SOS:** MobileGestalt caches HasBaseband / contains-cellular-radio / cellular-data from the first boot (no
+    baseband node -> 0). Pushed the 11-10 backup cache (same build 20H392, CacheUUID 42F6FA57..., identical to the
+    fresh one) with the 5 CacheData bytes of 2026-11-10 set (offset 320 = 3; 560 / 632 / 2600 / 4792 = 1), read back.
+    Fresh cache kept in the session scratchpad (mg-fresh.plist).
+  - **Apps:** as on 2026-10-30: `com.apple.migration.plist` and
+    `/System/Library/DataClassMigrators/CoreLocationMigrator.migrator/CoreLocationMigrator` removed -> the next boot runs
+    the data migration and installs the 31 staged apps (Weather brings its poster).
+  - USB link: up ~1-5 min into each `fastboot boot`, then the phone stops answering (en8 stays "active"): pushes are
+    batched into one window (scratchpad stage3.sh waits for the link and runs at once).
+
 - **2026-11-17 20:30: iOS REINSTALLED after an accidental factory reset (userdata had become f2fs)**
   - Symptom: the full-logging image stopped on the GPU colour test; kernel log `hfs_ValidateHFSPlusVolumeHeader:
     unknown Volume Signature : 1020` -> `cannot mount root, errno = 19`, retried for ever (`partition-type:userdata`
