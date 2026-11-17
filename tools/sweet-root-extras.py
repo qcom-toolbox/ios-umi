@@ -18,6 +18,8 @@ firmware and builds stay on this Mac):
   audio    VirtualAudio.plugin back from HAL.disabled (SweetAudio provides its devices)
   gestalt  the MobileGestalt cache with the baseband answers (no SOS): ~/ios-umi-backup/mg-cache-2026-11-10 +
            the 5 bytes of 2026-11-10 (only valid for build 20H392, CacheUUID 42F6FA57-...)
+  network  a "Wi-Fi" service on en0 (DHCP) in SystemConfiguration/preferences.plist: on the 2026-11-17 reinstall
+           configd never named any interface (NetworkInterfaces.plist empty) and Wi-Fi stayed "connecting"
   apps     data migration left to run at the first boot (com.apple.migration.plist removed) without
            CoreLocationMigrator (it hangs on locationd): installs the 31 staged apps (~3 min, progress bar)
 A missing source is reported and skipped. --no-chown: test as a normal user (ownership not set).
@@ -170,6 +172,28 @@ def gestalt(root):
     put(root, d + '/com.apple.MobileGestalt.plist', data=plistlib.dumps(mg, fmt=plistlib.FMT_BINARY))
 
 
+def network(root):
+    print('network: Wi-Fi service on en0 (DHCP)')
+    import uuid
+    path = os.path.join(root, 'private/var/preferences/SystemConfiguration/preferences.plist')
+    d = plistlib.load(open(path, 'rb')) if os.path.exists(path) else {'__VERSION__': 20191120}
+    if d.get('NetworkServices'):
+        print('  preferences.plist already has services: left alone')
+        return
+    svc, st = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
+    d['NetworkServices'] = {svc: {
+        'DNS': {}, 'IPv4': {'ConfigMethod': 'DHCP'}, 'IPv6': {'ConfigMethod': 'Automatic'},
+        'Interface': {'DeviceName': 'en0', 'Hardware': 'AirPort', 'Type': 'Ethernet', 'UserDefinedName': 'Wi-Fi'},
+        'Proxies': {'ExceptionsList': ['*.local', '169.254/16'], 'FTPPassive': 1}, 'UserDefinedName': 'Wi-Fi'}}
+    d['Sets'] = {st: {'Network': {'Global': {'IPv4': {'ServiceOrder': [svc]}}, 'Interface': {'en0': {'AirPort': {}}},
+                                  'Service': {svc: {'__LINK__': '/NetworkServices/' + svc}}},
+                      'UserDefinedName': 'Automatic'}}
+    d['CurrentSet'] = '/Sets/' + st
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    put(root, '/private/var/preferences/SystemConfiguration/preferences.plist',
+        data=plistlib.dumps(d, fmt=plistlib.FMT_BINARY))
+
+
 def apps(root):
     print('apps: data migration at the first boot, without CoreLocationMigrator')
     for p in ('private/var/mobile/Library/Preferences/com.apple.migration.plist',
@@ -192,6 +216,7 @@ def main():
     firmware(root)
     launchd(root)
     gestalt(root)
+    network(root)
     apps(root)
     if missing:
         print('%d source(s) missing (skipped):' % len(missing))

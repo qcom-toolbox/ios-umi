@@ -283,6 +283,15 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-17 22:20: Wi-Fi works - a network service written by hand**
+  - A plain reboot did not help (NetworkInterfaces.plist still only `__VERSION__`, preferences.plist only the host
+    names). Pushed `/private/var/preferences/SystemConfiguration/preferences.plist` with one "Wi-Fi" service
+    (Interface DeviceName en0, Hardware AirPort, Type Ethernet; IPv4 DHCP, IPv6 Automatic) in an "Automatic" set made
+    CurrentSet (originals kept as scratchpad sc-*-before-stage4.plist). Next boot: one WPA2 join at 202 s, configd
+    default route via 192.168.1.1 on en0 as primary (LTE secondary), "2092 frames sent, 4680 received (6.7 MB)".
+    Why configd never names interfaces on this root is still open (it did on the first install).
+  - tools/sweet-root-extras.py writes the same service when preferences.plist has none.
+
 - **2026-11-17 20:45: fixes confirmed; Wi-Fi "connecting" = no network service; one-pass reinstall tool**
   - Boot after the fixes (fastboot boot, umi-0322-full): backboardd surfaces back to 'BGRA' 0 planes row 4608,
     **5790 of 5793 presents direct**; data migration ran (staging folder empty, 32 entries in Bundle/Application,
