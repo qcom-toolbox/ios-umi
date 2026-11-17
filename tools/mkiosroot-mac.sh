@@ -23,7 +23,7 @@ keep=$!
 devs=()
 cleanup() {
 	kill "$keep" 2>/dev/null || true
-	for d in "${devs[@]:-}"; do [[ -n $d ]] && hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
+	for d in ${devs[@]+"${devs[@]}"}; do [[ -n $d ]] && hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
 }
 trap cleanup EXIT
 
@@ -35,10 +35,12 @@ attach_ro() {
 	local key=()
 	[[ ${2:-} == raw ]] && key=(-imagekey diskimage-class=CRawDiskImage)
 	local o
-	o=$(hdiutil attach -readonly -owners on -nobrowse "${key[@]}" -mountrandom "$work/mnt" "$1")
-	devs+=("$(echo "$o" | awk 'NR==1{print $1}')")
+	o=$(hdiutil attach -readonly -noverify -owners on -nobrowse ${key[@]+"${key[@]}"} -mountrandom "$work/mnt" "$1")
+	devs+=("$(echo "$o" | awk '/^\/dev\//{print $1; exit}')")
 	echo "$o" | awk -F'\t' 'NF>=3 && $NF ~ /\// {m=$NF} END{gsub(/^ +| +$/,"",m); print m}'
 }
+# a mount point under WORKDIR/mnt, or stop (an empty path would make the checks look at the Mac's own /System)
+need_mnt() { [[ -n $1 && $1 == "$work/mnt/"* && -d $1 ]] || { echo "image did not mount (got '$1')" >&2; exit 1; }; }
 
 fetch() {
 	[[ -f $work/dl/$1 ]] || python3 -I "$repo/tools/remotezip.py" "$IPSW" "$1" "$work/dl"
@@ -49,7 +51,7 @@ mkdir -p "$work/dl" "$work/mnt" "$work/root"
 
 step "raw sparse image $out ($size), case-sensitive journaled HFS+ iOSRoot"
 mkfile -n "$size" "$out"
-dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | awk 'NR==1{print $1}')
+dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | awk '/^\/dev\//{print $1; exit}')
 newfs_hfs -s -J -v iOSRoot "$dev"
 hdiutil detach "$dev" >/dev/null
 hdiutil attach -imagekey diskimage-class=CRawDiskImage -owners on -nobrowse -mountpoint "$work/root" "$out" >/dev/null
@@ -61,14 +63,14 @@ sudo mdutil -i off "$R" >/dev/null 2>&1 || true
 step "OS: $OS"
 fetch "$OS"
 m=$(attach_ro "$work/dl/$OS")
-echo "mounted at $m"; [[ -d $m/System/Library/xpc ]] || { echo "the OS image did not mount as expected" >&2; exit 1; }
+echo "mounted at $m"; need_mnt "$m"; [[ -d $m/System/Library/xpc ]] || { echo "the OS image did not mount as expected" >&2; exit 1; }
 sudo ditto --nopreserveHFSCompression "$m" "$R"
 hdiutil detach "$m" >/dev/null; rm -f "$work/dl/$OS"
 
 step "SystemOS cryptex: $SYSOS"
 fetch "$SYSOS"
 m=$(attach_ro "$work/dl/$SYSOS" raw)
-echo "mounted at $m"; [[ -d $m/System/Library/Caches/com.apple.dyld ]] || { echo "SystemOS did not mount as expected" >&2; exit 1; }
+echo "mounted at $m"; need_mnt "$m"; [[ -d $m/System/Library/Caches/com.apple.dyld ]] || { echo "SystemOS did not mount as expected" >&2; exit 1; }
 sudo mkdir -p "$R/private/preboot/Cryptexes/OS"
 sudo ditto --nopreserveHFSCompression "$m" "$R/private/preboot/Cryptexes/OS"
 hdiutil detach "$m" >/dev/null; rm -f "$work/dl/$SYSOS"
@@ -76,7 +78,7 @@ hdiutil detach "$m" >/dev/null; rm -f "$work/dl/$SYSOS"
 step "AppOS cryptex: $APPOS"
 fetch "$APPOS"
 m=$(attach_ro "$work/dl/$APPOS" raw)
-echo "mounted at $m"
+echo "mounted at $m"; need_mnt "$m"
 sudo mkdir -p "$R/private/preboot/Cryptexes/App"
 sudo ditto --nopreserveHFSCompression "$m" "$R/private/preboot/Cryptexes/App"
 hdiutil detach "$m" >/dev/null; rm -f "$work/dl/$APPOS"
@@ -122,7 +124,7 @@ sudo rm -rf "$R"/{.Spotlight-V100,.Trashes,.TemporaryItems,.metadata_never_index
 df -h "$R"
 hdiutil detach "$R" >/dev/null
 devs=("${devs[@]/$R}")
-dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | awk 'NR==1{print $1}')
+dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | awk '/^\/dev\//{print $1; exit}')
 sudo fsck_hfs -f -y "$dev" || true
 sudo fsck_hfs -f -n "$dev"
 hdiutil detach "$dev" >/dev/null
