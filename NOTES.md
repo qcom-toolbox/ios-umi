@@ -283,6 +283,37 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-17 20:30: iOS REINSTALLED after an accidental factory reset (userdata had become f2fs)**
+  - Symptom: the full-logging image stopped on the GPU colour test; kernel log `hfs_ValidateHFSPlusVolumeHeader:
+    unknown Volume Signature : 1020` -> `cannot mount root, errno = 19`, retried for ever (`partition-type:userdata`
+    = f2fs: the Android-side reset reformatted the iOS root).
+  - **Root rebuilt on the Mac: `tools/mkiosroot-mac.sh WORKDIR OUT.img [32g]`** (new; hdiutil / newfs_hfs / ditto as
+    root, volumes attached `-owners on`, files uncompressed, same steps as mkiosroot.sh + sweet-root-tweaks.py;
+    asks sudo once - run it in the user's own terminal, Claude's tabs do not get the password). IPSW members fetched
+    one at a time and deleted after the copy (23 GB free was enough). 32 GiB volume, 12 GB used, fsck_hfs OK, 4 min
+    (+ download). Warning seen: no mobileactivationd container yet -> data ark skipped (first boot creates it).
+  - **Flash: `tools/umi-flash-sparse.py IMAGE userdata`** (new): Homebrew fastboot 37 cannot read the 32 GiB raw
+    image ("Failed reading from userdata"); the tool sends Android-sparse pieces of 600 MiB (zero blocks / holes as
+    FILL, DONT_CARE only outside each piece's range), `--dry=N` decodes and compares first. 19 pieces, all OKAY.
+    `fastboot reboot` then hung (ABL after a big flash): Power held by hand.
+  - `boot` = `shim/out/umi-0322-full.img` (0313's full line, kernel 0322): the user wanted the logging back.
+  - **No USB link after a power-on boot from `boot`:** sweet_usb only uses the controller if ABL left it powered
+    (`SWEET USB: controller unpowered or unclocked`); fastboot powers it, a normal power-on does not. For file pushes
+    and the live log: Power + Vol down, `fastboot boot` the image, then `tools/umi-usbnet.sh`.
+  - **Phone files restored (tools/umi-push-staged.py, every file read back):**
+    stage 1 (29 entries): `/System/Library/Extensions/SweetMetal2.bundle` (SweetMetal2 = m2v out-usecount
+    aaa562ce..., libvulkan_freedreno = Turnip 0004 7d9f8ddf..., Info.plist, _CodeSignature), `/var/local` (777) +
+    m2v-cache (777), mtl2-env `TU_DARWIN_SERVICE=SweetAdreno`, mtl2-tu-debug `noubwc`, mtl2-clients
+    `*,-FitnessWidget,-chronod`, mtl2.log (666); `/usr/local/lib/libsweet-{sb,island,bt}.dylib` (phone/out),
+    `/usr/local/bin/sweet-telephonyd` (rebuilt); `/System/Library/xpc/launchd.plist` = fresh + the last phone state
+    (backup launchd.plist.sweet-dirtyregions): backboardd CA_DISABLE_{DETACHED,DIRTY_REGIONS,GAIN_MAP_LAYERS}=1,
+    adprivacyd / promotedcontentd / fairplayd.H2 / vmd removed, com.sweet.telephonyd added (gputest / vktest test
+    jobs left out). Stage 2 (451 entries): `/private/var/sweet/{slpi,adsp,adsp-rpc/{adsp,acdb},sensors/{vendor-sensors,
+    persist-sensors,soc0}}` from research/{slpi-fw/umi,audio-umi,sensors-umi}; SweetAudio.driver in
+    /System/Library/Audio/Plug-Ins/HAL; VirtualAudio.plugin back in /Library/Audio/Plug-Ins/HAL (from HAL.disabled).
+    Not restored: Wi-Fi networks (user rejoins), the jailbreak / Sileo tree, the 31 stock apps restored on 10-30,
+    heic / island trace tools, MobileGestalt cache (rebuilt by iOS).
+
 - **2026-11-16 23:55: `boot` FLASHED with the quiet daily image** (user: "In fastboot, flash it"):
   `shim/out/umi-0322-quiet-flash.img` (SHA-256 e1cda5af75c2e524..., kernel 56b0fe4 = 0322) written to `boot` (A-only,
   0x8000000) with `fastboot flash boot`, then `fastboot reboot`. Built with `UMI_QUIET=1 tools/umi-boot-image.sh`
