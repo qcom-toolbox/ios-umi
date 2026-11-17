@@ -119,6 +119,11 @@ sudo install -m 0600 -o 0 -g 0 "$work/systembag.kb" "$R/private/var/keybags/syst
 step "SWEET tweaks (tools/sweet-root-tweaks.py)"
 sudo python3 -I "$repo/tools/sweet-root-tweaks.py" "$R"
 
+if [[ ${SWEET_EXTRAS:-1} == 1 ]]; then
+	step "SWEET add-ons (tools/sweet-root-extras.py: GPU, libraries, telephonyd, firmware, audio, launchd, gestalt, apps)"
+	sudo python3 -I "$repo/tools/sweet-root-extras.py" "$R"
+fi
+
 step "clean up and check"
 sudo rm -rf "$R"/{.Spotlight-V100,.Trashes,.TemporaryItems,.metadata_never_index,.fseventsd}
 df -h "$R"

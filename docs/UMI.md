@@ -59,6 +59,43 @@ touch starts ~45 s after the kernel finds the UFS root.
 - **In TWRP never "Format Data" or wipe:** `userdata` holds the iOS root.
 - After `fastboot flash`, the bootloader answers nothing until it is restarted.
 
+## Reinstall from scratch on macOS: a fully working phone in one pass (erases userdata)
+
+What brought the phone back after the accidental factory reset of 2026-11-17 (NOTES.md), now in two tools so the
+root comes out of the build complete. About 15 min of build + download, 5-10 min of flashing. Nothing personal
+is restored: Wi-Fi networks and user data start empty.
+
+1. **Kernel and boot image** as usual (`tools/build-kernel-local.sh`, `tools/umi-boot-image.sh KERNEL OUT EXTRAS`,
+   with the full extras line of the current daily image; `UMI_QUIET=1` drops the serial console / kprintf spam).
+2. **Root image, with every add-on inside:**
+   ```sh
+   tools/mkiosroot-mac.sh WORKDIR WORKDIR/ios16-root-32g.img      # in your own terminal: it asks sudo once
+   ```
+   Downloads the OS / SystemOS / AppOS images of 20H392 from Apple one at a time (deleted after the copy, ~23 GB free
+   is enough), builds a 32 GiB case-sensitive journaled HFS+ volume, runs `tools/sweet-root-tweaks.py` and then
+   `tools/sweet-root-extras.py` (GPU bundle + /var/local config, libsweet-sb / island / bt, sweet-telephonyd,
+   SweetAudio + VirtualAudio, SLPI / ADSP / sensor files, launchd.plist with the backboardd CA settings incl.
+   `CA_DISABLE_FRAMEBUFFER_COMPRESSION`, the MobileGestalt cache with the baseband answers, app migration armed),
+   then fsck. The extras need sources that are not in git: `xnu-work/work/m2v-bridge-src` builds, `phone/out`
+   builds (`phone/build-*.sh`), `research/{slpi-fw,audio-umi,sensors-umi}` and `~/ios-umi-backup/mg-cache-2026-11-10`;
+   a missing one is listed and skipped. `SWEET_EXTRAS=0` = the plain root.
+3. **Flash** (phone in fastboot, Power + Vol down):
+   ```sh
+   fastboot flash boot BOOT.img
+   tools/umi-flash-sparse.py WORKDIR/ios16-root-32g.img userdata   # 600 MiB sparse pieces; --dry=2 checks first
+   ```
+   Homebrew fastboot cannot read the 32 GiB raw image itself. After the flash ABL often hangs on `fastboot
+   reboot`: hold Power.
+4. **First boot:** Apple logo + progress bar ~3 min (the 31 removable apps are installed), then the lock screen.
+   Join Wi-Fi in Settings. If Wi-Fi stays "connecting", check `/private/var/preferences/SystemConfiguration/
+   preferences.plist` has a Wi-Fi service (2026-11-17: empty after the migration boot; reboot once).
+5. **USB (live log, file pushes) only after `fastboot boot`:** a power-on from the flashed `boot` leaves the USB
+   controller off (`SWEET USB: controller unpowered or unclocked`). Power + Vol down, `fastboot boot IMAGE`,
+   `tools/umi-usbnet.sh` at once: the USB Ethernet answers for the first few minutes of a boot only, so batch the
+   pushes (`tools/umi-push-staged.py ROOT MODES LOG`, `tools/umi-files.py`).
+
+Not covered yet: the jailbreak (Sileo) tree, the HEIC / island trace tools.
+
 ## Rebuild the iOS root (erases userdata)
 
 README step 2 with `tools/mkiosroot.sh` and `tools/sweet-root-tweaks.py`. The three
