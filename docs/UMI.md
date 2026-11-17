@@ -94,7 +94,11 @@ is restored: Wi-Fi networks and user data start empty.
    `tools/umi-usbnet.sh` at once: the USB Ethernet answers for the first few minutes of a boot only, so batch the
    pushes (`tools/umi-push-staged.py ROOT MODES LOG`, `tools/umi-files.py`).
 
-Not covered yet: the jailbreak (Sileo) tree, the HEIC / island trace tools.
+The jailbreak tree is in too (`SWEET_JAILBREAK=1`, default): `tools/umi-jailbreak-stage.sh` (Procursus rootful
+bootstrap 1700 + suite 1800 repo, Sileo 2.5.1, libkrw0-tfp0, dpkg entries; SHA-256 pinned downloads) copied in
+with the tar modes. On a running phone instead: `tools/umi-push-staged.py OUT/root OUT/modes.txt OUT/push.log`
+(resumable; one USB window was enough on 2026-11-17), then one boot with `sweetlsreset=1`.
+Not covered: the HEIC / island trace tools.
 
 ## Rebuild the iOS root (erases userdata)
 

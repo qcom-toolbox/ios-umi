@@ -124,6 +124,17 @@ if [[ ${SWEET_EXTRAS:-1} == 1 ]]; then
 	sudo python3 -I "$repo/tools/sweet-root-extras.py" "$R"
 fi
 
+if [[ ${SWEET_JAILBREAK:-1} == 1 ]]; then
+	step "jailbreak tree (tools/umi-jailbreak-stage.sh: Procursus rootful bootstrap, Sileo 2.5.1, libkrw0-tfp0, repo)"
+	bash "$repo/tools/umi-jailbreak-stage.sh" "$work/jb"
+	# copy as root, then the tar modes (setuid / sticky kept): the same tree umi-push-staged.py pushes
+	sudo ditto "$work/jb/root" "$R"
+	while read -r mode path; do
+		[[ -n $path ]] && sudo chown -h 0:0 "$R$path" && sudo chmod -h "$mode" "$R$path" 2>/dev/null
+	done <"$work/jb/modes.txt"
+	echo "Sileo.app registers at the first boot (fresh LaunchServices database)"
+fi
+
 step "clean up and check"
 sudo rm -rf "$R"/{.Spotlight-V100,.Trashes,.TemporaryItems,.metadata_never_index,.fseventsd}
 df -h "$R"

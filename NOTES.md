@@ -283,6 +283,14 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
+  repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
+  1700, Sileo 2.5.1, libkrw0-tfp0 1.1.1-2; 4333 entries, 76 dpkg packages, procursus.sources suite
+  iphoneos-arm64/1800 = the default repo); pushed with umi-push-staged.py in ONE USB window (22:20:51-22:27:46,
+  4332 OK, 0 failures). Image `shim/out/umi-0322-lsreset.img` (0313 line - sweettop + `sweetlsreset=1`) for the
+  one boot that lets LaunchServices pick up Sileo.app. mkiosroot-mac.sh now also stages and copies this tree
+  (`SWEET_JAILBREAK=1` default; not run through a full build yet).
+
 - **2026-11-17 22:20: Wi-Fi works - a network service written by hand**
   - A plain reboot did not help (NetworkInterfaces.plist still only `__VERSION__`, preferences.plist only the host
     names). Pushed `/private/var/preferences/SystemConfiguration/preferences.plist` with one "Wi-Fi" service
