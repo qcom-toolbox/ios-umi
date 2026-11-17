@@ -290,6 +290,7 @@
   4332 OK, 0 failures). Image `shim/out/umi-0322-lsreset.img` (0313 line - sweettop + `sweetlsreset=1`) for the
   one boot that lets LaunchServices pick up Sileo.app. mkiosroot-mac.sh now also stages and copies this tree
   (`SWEET_JAILBREAK=1` default; not run through a full build yet).
+  - Booted umi-0322-lsreset.img at 22:44 (fastboot boot): **user: "Sileo opens"**. Normal reboots keep it.
 
 - **2026-11-17 22:20: Wi-Fi works - a network service written by hand**
   - A plain reboot did not help (NetworkInterfaces.plist still only `__VERSION__`, preferences.plist only the host
