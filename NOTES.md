@@ -283,6 +283,21 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-17 20:45: fixes confirmed; Wi-Fi "connecting" = no network service; one-pass reinstall tool**
+  - Boot after the fixes (fastboot boot, umi-0322-full): backboardd surfaces back to 'BGRA' 0 planes row 4608,
+    **5790 of 5793 presents direct**; data migration ran (staging folder empty, 32 entries in Bundle/Application,
+    com.apple.migration.plist rewritten); LTE data up.
+  - Wi-Fi: WPA2 join to the user's 5 GHz network OK (VHT80, 2 streams, keys installed, peer authorized), but iOS shows
+    "connecting": wifid leaves and rejoins (264 / 351 / 357 s) and the kernel counts **0 frames sent**, 236 received.
+    `/private/var/preferences/SystemConfiguration/preferences.plist` (200 bytes) has no network service and
+    `NetworkInterfaces.plist` (63 bytes) no interface: configd never named en0 (en0 appeared at 177 s, during the
+    first-boot migration). On the first install configd made the "Wi-Fi" service by itself (0202). Next: reboot once
+    and look again; else write the service + interface entries.
+  - **`tools/sweet-root-extras.py`** (run by mkiosroot-mac.sh after the tweaks; `SWEET_EXTRAS=0` = off) puts every
+    add-on of this reinstall into the root at build time (sources listed in its header); tested with `--no-chown`
+    on a scratch tree: launchd.plist and MobileGestalt cache byte-identical to the phone's. Procedure:
+    docs/UMI.md "Reinstall from scratch on macOS".
+
 - **2026-11-17 20:35: after the reinstall - inverted colours / slow / status bar too high = compressed framebuffer;
   SOS = MobileGestalt cache; 31 apps via migration again**
   - User on the first boot with the restored files: GPU "completely broken": inverted colours, slow, glitchy;
