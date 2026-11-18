@@ -1,0 +1,57 @@
+--- NativeBridgeMetalFrontend.mm.pre-surfacesync	2026-11-18 21:34:33
++++ NativeBridgeMetalFrontend.mm	2026-11-18 21:34:45
+@@ -1370,6 +1370,33 @@
+ static void releaseSurfacesInUse(NBCommandBuffer *cb) {
+  NSMutableArray *used=cb.inUseSurfaces;cb.inUseSurfaces=nil;
+  for(id surface in used)IOSurfaceDecrementUseCount((__bridge IOSurfaceRef)surface);
++}
++// SweetMetal2 (2026-11-18): the compositor waits for the GPU at each commit that draws into an IOSurface (a drawable / layer
++// surface), as CoreAnimation does itself under CA_COLOR_FLUSH - the one setting under which the home screen, Control Center
++// and app switcher showed no pieces of earlier frames (NOTES 2026-11-15 20:00). CoreAnimation's colour flush waits for the
++// GPU after each flash (CA_COLOR_NO_WAIT is its opt-out), so it never encodes the next frame while the GPU still runs the
++// last one; this does the same without the flashes. Bounded (a command buffer may wait for an event this thread signals later).
++// /var/local/mtl2-env SWEET_MTL2_SURFACE_SYNC=names (comma list, "*" = all, "0" = off; default backboardd),
++// SWEET_MTL2_SURFACE_SYNC_MS=N (default 100).
++static std::atomic<uint64_t> gSurfaceSyncs,gSurfaceSyncTimeouts;
++static uint32_t surfaceSyncMs(void) {
++ static const uint32_t ms=[]{
++  const char *v=getenv("SWEET_MTL2_SURFACE_SYNC");
++  const char *list=v?v:"backboardd";
++  const char *prog=getprogname();
++  bool on=false;
++  if(prog && strcmp(list,"0")){
++   char text[256];strlcpy(text,list,sizeof text);char *save=nullptr;
++   for(char *name=strtok_r(text,", \t",&save);name;name=strtok_r(nullptr,", \t",&save))
++    if(!strcmp(name,"*") || !strcmp(name,prog))on=true;
++  }
++  const char *t=getenv("SWEET_MTL2_SURFACE_SYNC_MS");
++  uint32_t n=t?(uint32_t)strtoul(t,nullptr,10):100;
++  if(n==0)on=false;
++  char line[96];snprintf(line,sizeof line,"native-metal: surface sync %s (%u ms cap)",on?"on":"off",n);sm2_logs(line);
++  return on?n:0;
++ }();
++ return ms;
+ }
+ @implementation NBCommandBuffer
+ - (instancetype)init {
+@@ -1565,8 +1592,19 @@
+   markSurfacesInUse(self);
+   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
+   void *context=(__bridge_retained void *)self;
++  const uint32_t syncMs=_writtenSurfaces.count?surfaceSyncMs():0;   // read before the commit: completion clears the set
++  NmbCommandBuffer *handle=_handle;
+   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
+-     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle))return;
++     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle)) {
++   if(syncMs) {
++    const uint64_t n=++gSurfaceSyncs;
++    if(nmb_command_buffer_wait(handle,syncMs)!=0 && gSurfaceSyncTimeouts++<16)
++     NBLOG(@"native-metal: surface sync: GPU not done after %u ms (commit %llu)",syncMs,(unsigned long long)n);
++    if((n&1023)==0){char line[128];snprintf(line,sizeof line,"native-metal: surface sync: %llu commits waited, %llu over the cap",
++     (unsigned long long)n,(unsigned long long)gSurfaceSyncTimeouts.load());sm2_logs(line);}
++   }
++   return;
++  }
+   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers
+   releaseSurfacesInUse(self);
+   [self refuse:[@"commit: " stringByAppendingString:lastError()]];

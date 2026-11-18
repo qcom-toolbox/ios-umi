@@ -283,6 +283,27 @@
     (log stops, no ARP; replug did not help, a reboot did), and the Mac loses 192.168.7.1 after each boot
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
+- **2026-11-18 21:40: home / Control Center / app switcher "pieces of the previous frame" - SweetMetal2 surface sync
+  (built, NOT on the phone yet)** (diff `phone/metal2/frontend-surface-sync.diff`, build
+  `xnu-work/work/m2v-bridge-src/out-surfacesync/SweetMetal2.bundle/SweetMetal2`, sha256 7a9634e5...; base = the
+  phone's aaa562ce... (out-usecount), same __text / __cstring sizes when rebuilt from the saved source).
+  - Reasoning: the only setting that ever gave "0 glitch" was backboardd `CA_COLOR_FLUSH=1` (2026-11-15 20:00), at the
+    same ~9 fps. QuartzCore 20H392's option table lists `CA_COLOR_NO_WAIT` right after CA_COLOR_FLUSH (index 3 vs 0),
+    so colour flush waits for the GPU by default: CA never encodes the next frame while the GPU still runs the last
+    one. The kernel's present already waits for every submitted fence (sweet_adreno_finish), so what the wait
+    removes is CPU work overlapping GPU work in backboardd (CPU rewriting memory a frame in flight still reads), not a
+    flip to an unfinished surface. Not proven; this is the cheapest way to get the colour-flush ordering without the
+    flashes.
+  - Change: in the listed processes (default backboardd only), a commit whose command buffer writes an IOSurface
+    (render target / written texture or buffer) waits for that command buffer's completion, capped at 100 ms (a
+    command buffer may wait for an event this thread signals later). Logs `native-metal: surface sync on (100 ms cap)`,
+    every 1024th wait `surface sync: N commits waited, M over the cap`, the first 16 timeouts. mtl2-env:
+    `SWEET_MTL2_SURFACE_SYNC=0` off, `=backboardd,SpringBoard` / `*` other processes, `SWEET_MTL2_SURFACE_SYNC_MS=N`.
+  - Other QuartzCore switches found in the same table, untested: `CA_FORCE_RESOURCE_SYNC`,
+    `CA_USE_PRESENT_ON_FINISH`, `CA_DISABLE_ASYNCHRONOUS`, `CA_FORCE_DOUBLE_BUFFERING` (next tries if this fails).
+  - Install (needs the user's OK): backup `SweetMetal2.sweet-pre-surfacesync` next to it, rm + put (never overwrite a
+    mapped signed file), read back, reboot. Booted `shim/out/umi-0322-full.img` (fastboot boot) for the push.
+
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
   1700, Sileo 2.5.1, libkrw0-tfp0 1.1.1-2; 4333 entries, 76 dpkg packages, procursus.sources suite
