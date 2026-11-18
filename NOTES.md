@@ -324,6 +324,8 @@
     BACKDROP_CACHE; everything else checked identical, 527 daemons); previous file as
     `launchd.plist.sweet-pre-backdropcache` on the phone and in `~/ios-umi-backup/gpu-2026-11-18/`; rm + put, read back.
     Next boot.
+    **Booted: "still exact same issue plus vsync issue" (user) - no help, worse.** Frames: 14.0 / 27.0 fps animating,
+    then a steady 9.9 fps (100 ms gaps, GPU wait ~1 us) at rest. To be reverted (backup above).
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
