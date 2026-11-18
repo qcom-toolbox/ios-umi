@@ -312,6 +312,13 @@
     surfaces backboardd composites), and tell the flicker apart from the old blur bug (Reduce Transparency).
   - **Every process (user OK'd):** `/var/local/mtl2-env` += `SWEET_MTL2_SURFACE_SYNC=*` (previous 30-byte file as
     `mtl2-env.sweet-pre-syncall` on the phone and in `~/ios-umi-backup/gpu-2026-11-18/`; read back). Next boot.
+    **Booted: user "fixed home screen and finally fixed App Library"; lock screen and notification screen still have
+    issues; status bar and dock flicker, more rarely.** But mtl2.log shows only backboardd turned the sync on:
+    SpringBoard, PosterBoard and the posters read the env and never logged "surface sync on" (none of their command
+    buffers wrote a tracked IOSurface), so this boot ran the same code path as the previous one - the App Library
+    gain is the backboardd sync, or chance. What is left (lock screen notifications, Notification Centre, dock,
+    status bar) is all CABackdropLayer blur = the old blur bug. Next test: backboardd `CA_DISABLE_BACKDROP_CACHE=1`
+    (QuartzCore option table) in launchd.plist; user check with Reduce Transparency.
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
