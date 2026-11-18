@@ -319,6 +319,11 @@
     gain is the backboardd sync, or chance. What is left (lock screen notifications, Notification Centre, dock,
     status bar) is all CABackdropLayer blur = the old blur bug. Next test: backboardd `CA_DISABLE_BACKDROP_CACHE=1`
     (QuartzCore option table) in launchd.plist; user check with Reduce Transparency.
+  - **Installed (user OK'd):** backboardd EnvironmentVariables += `CA_DISABLE_BACKDROP_CACHE=1` in
+    `/System/Library/xpc/launchd.plist` (now DETACHED, DIRTY_REGIONS, FRAMEBUFFER_COMPRESSION, GAIN_MAP_LAYERS,
+    BACKDROP_CACHE; everything else checked identical, 527 daemons); previous file as
+    `launchd.plist.sweet-pre-backdropcache` on the phone and in `~/ios-umi-backup/gpu-2026-11-18/`; rm + put, read back.
+    Next boot.
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
