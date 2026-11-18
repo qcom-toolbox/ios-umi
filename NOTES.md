@@ -310,6 +310,8 @@
     later. Frames: 30.4 / 18.3 / 18.9 / 13.0 / 23.2 fps animating, GPU wait mean 1.7 / 12.4 / 11.5 / 9.1 / 0.7 ms.
     Kept. Next: the same sync in every process (mtl2-env `SWEET_MTL2_SURFACE_SYNC=*`: SpringBoard and apps draw the
     surfaces backboardd composites), and tell the flicker apart from the old blur bug (Reduce Transparency).
+  - **Every process (user OK'd):** `/var/local/mtl2-env` += `SWEET_MTL2_SURFACE_SYNC=*` (previous 30-byte file as
+    `mtl2-env.sweet-pre-syncall` on the phone and in `~/ios-umi-backup/gpu-2026-11-18/`; read back). Next boot.
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
