@@ -305,6 +305,11 @@
     (aaa562ce...) as `SweetMetal2.sweet-pre-surfacesync` next to it (read back identical) and in
     `~/ios-umi-backup/gpu-2026-11-18/`; rm + put of the new one, read back identical (7a9634e5..., 22755440 bytes).
     Loads at the next reboot. Undo: rm SweetMetal2, put the backup back as SweetMetal2.
+  - **Booted (umi-0322-full, fastboot boot): "still glitchy but has improved", flickering still there (user).**
+    mtl2.log: backboardd `surface sync on (100 ms cap)`, 2 waits over the cap at start (commits 159 / 332), none
+    later. Frames: 30.4 / 18.3 / 18.9 / 13.0 / 23.2 fps animating, GPU wait mean 1.7 / 12.4 / 11.5 / 9.1 / 0.7 ms.
+    Kept. Next: the same sync in every process (mtl2-env `SWEET_MTL2_SURFACE_SYNC=*`: SpringBoard and apps draw the
+    surfaces backboardd composites), and tell the flicker apart from the old blur bug (Reduce Transparency).
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
