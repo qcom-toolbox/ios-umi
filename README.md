@@ -31,7 +31,7 @@ The project started on the Redmi Note 10 Pro (`sweet`, SM7150), hence its name; 
 | Audio | The ADSP (booted by the kernel, APR to its AFE / ASM / ADM services) plays through tertiary MI2S (SD1) into the two CS35L41 amps; iOS's audio server reaches it through our `SweetAudio.driver` HAL plug-in and `/dev/sweet-audio` (`sweetadsp=1 sweetamp=1 sweetaudio=1`); ringtones and system sounds play from the speaker, ~3.5 min after boot |
 | Location | Works: Wi-Fi positioning (Weather shows the city for My Location; Maps asks for permission), since fairplayd.H2 was taken out of launchd's job list. No GPS receiver yet |
 | USB | ECM gadget (USB Ethernet) with a live kernel log and a small kernel file server for development |
-| GPU | Adreno 650 powered through GMU/RPMh, zap shader authenticated by TrustZone; Metal over Mesa's turnip and a metal2vulkan bridge for CoreAnimation and every app that asks (`/var/local/mtl2-clients` = `*`), Safari included; per-app GPU memory caps |
+| GPU | Adreno 650 powered through GMU/RPMh, zap shader authenticated by TrustZone; Metal over Mesa's turnip and a metal2vulkan bridge for CoreAnimation and every app that asks (`/var/local/mtl2-clients` = `*`), Safari included; per-app GPU memory caps; the compositor waits for the GPU each frame (no more pieces of old frames on the home screen, App Library, Control Center and app switcher, 2026-11-18) |
 | Bluetooth | QCA6390 over UART: scan, connect and pair in Settings (more in [`Status.md`](Status.md)) |
 | Cellular | Snapdragon X55 modem brought up by the kernel over PCIe2 (`sweetmdm=10 sweetmdmonline=1`): SIM, LTE registration, carrier name, signal bars and LTE in the status bar, **mobile data** (Safari over LTE) through the kernel's `pdp_ip0` and `sweet-telephonyd`, a stand-in for CommCenter; Control Center's cellular data button. IPv4 only; Settings > Cellular incomplete; no calls or SMS |
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
@@ -44,7 +44,7 @@ The project started on the Redmi Note 10 Pro (`sweet`, SM7150), hence its name; 
 - **No microphones** yet, and the earpiece speaker is not used as a second channel.
 - **No hardware video decoding** (VideoToolbox / AVD), so videos do not play; music apps never reached the audio system in tests.
 - **Wi-Fi** is 2.4 GHz only, legacy rates, no WPA3.
-- **GPU**: Safari's address bar glitches and its status bar is white, the App Library blur glitches, and an app that hits its GPU memory cap gets no buffer (it may crash rather than freeze the phone).
+- **GPU**: Safari's address bar glitches and its status bar is white, the lock screen, notifications, dock and status bar still flicker now and then, and an app that hits its GPU memory cap gets no buffer (it may crash rather than freeze the phone).
 - **Charging** from a computer's USB port (500 mA) is slower than iOS uses power: use a wall charger. No USB-PD or 30 W fast charge.
 - **No App Store, no Apple ID.**
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub AppleKeyStore, no data protection. Do not put anything personal on it.
