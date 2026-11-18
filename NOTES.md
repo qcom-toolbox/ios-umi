@@ -284,7 +284,7 @@
     (`tools/umi-usbnet.sh` again). driverkitd sig 9 and CacheDeleteExtension sig 6 at every boot (also before).
 
 - **2026-11-18 21:40: home / Control Center / app switcher "pieces of the previous frame" - SweetMetal2 surface sync
-  (built, NOT on the phone yet)** (diff `phone/metal2/frontend-surface-sync.diff`, build
+  (installed, loads at the next boot)** (diff `phone/metal2/frontend-surface-sync.diff`, build
   `xnu-work/work/m2v-bridge-src/out-surfacesync/SweetMetal2.bundle/SweetMetal2`, sha256 7a9634e5...; base = the
   phone's aaa562ce... (out-usecount), same __text / __cstring sizes when rebuilt from the saved source).
   - Reasoning: the only setting that ever gave "0 glitch" was backboardd `CA_COLOR_FLUSH=1` (2026-11-15 20:00), at the
@@ -301,8 +301,10 @@
     `SWEET_MTL2_SURFACE_SYNC=0` off, `=backboardd,SpringBoard` / `*` other processes, `SWEET_MTL2_SURFACE_SYNC_MS=N`.
   - Other QuartzCore switches found in the same table, untested: `CA_FORCE_RESOURCE_SYNC`,
     `CA_USE_PRESENT_ON_FINISH`, `CA_DISABLE_ASYNCHRONOUS`, `CA_FORCE_DOUBLE_BUFFERING` (next tries if this fails).
-  - Install (needs the user's OK): backup `SweetMetal2.sweet-pre-surfacesync` next to it, rm + put (never overwrite a
-    mapped signed file), read back, reboot. Booted `shim/out/umi-0322-full.img` (fastboot boot) for the push.
+  - **Installed 2026-11-18 21:50 (user OK'd)** on a `umi-0322-full.img` fastboot boot: the previous plugin
+    (aaa562ce...) as `SweetMetal2.sweet-pre-surfacesync` next to it (read back identical) and in
+    `~/ios-umi-backup/gpu-2026-11-18/`; rm + put of the new one, read back identical (7a9634e5..., 22755440 bytes).
+    Loads at the next reboot. Undo: rm SweetMetal2, put the backup back as SweetMetal2.
 
 - **2026-11-17 22:30: Sileo + Procursus bootstrap restored** (user: "restore sileo with some dependency and default
   repo"). `tools/umi-jailbreak-stage.sh` rebuilt the tree (pinned SHA-256s matched: Procursus rootful bootstrap
