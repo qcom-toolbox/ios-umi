@@ -94,42 +94,57 @@ static BOOL hideFallback(id self, SEL cmd) { (void)self; (void)cmd; return YES; 
 /* There is one camera, no visible space between two sensors. */
 static CGRect interSensor(id self, SEL cmd) { (void)self; (void)cmd; return CGRectZero; }
 
-static CGRect sensorFrame(id self, SEL cmd, CGRect bounds)
+/* The aperture lives in the hardware's (portrait) space on every Dynamic Island iPhone: in landscape SpringBoard
+ * keeps the pill at the camera and rotates the element content (transformForRotationToInterfaceOrientation:; there
+ * is only a _portraitFrameForPrimaryContainerView...). So the camera position applies in every orientation, unless
+ * the bounds turn out to be landscape-shaped (then logged and left to Apple; see sweet-island.log). */
+static unsigned rotatedLogs;
+static void logRotated(const char *what, id self, CGRect bounds, CGRect original, CGRect result)
 {
-    CGRect r = originalSensor(self, cmd, bounds);
-    /* Bounds can be a short status-bar strip: use the controller's orientation,
-     * not its aspect ratio. Landscape retains Apple's uncalibrated handling. */
     NSInteger orientation = ((NSInteger (*)(id, SEL))objc_msgSend)(self,
         sel_registerName("_activeElementInterfaceOrientation"));
-    if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationUnknown) {
+    if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationUnknown) return;
+    if (!logfile || rotatedLogs++ >= 80) return;
+    fprintf(logfile, "%s orientation %ld bounds %.1f %.1f %.1f %.1f apple %.1f %.1f %.1f %.1f -> %.1f %.1f\n", what,
+            (long)orientation, bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height,
+            original.origin.x, original.origin.y, original.size.width, original.size.height,
+            result.origin.x, result.origin.y);
+    fflush(logfile);
+}
+
+static CGRect sensorFrame(id self, SEL cmd, CGRect bounds)
+{
+    CGRect original = originalSensor(self, cmd, bounds), r = original;
+    /* Bounds can be a short status-bar strip; only a landscape-shaped area (wider than the 375 pt panel) is
+     * rotated interface space. */
+    if (bounds.size.width <= 376) {
         r.origin.x = bounds.origin.x + cameraX - r.size.width / 2;
         r.origin.y = bounds.origin.y + cameraY - r.size.height / 2;
     }
+    logRotated("sensor", self, bounds, original, r);
     return r;
 }
 
 static CGRect minimumSensorFrame(id self, SEL cmd)
 {
-    CGRect r = originalMinimumSensor(self, cmd);
-    NSInteger orientation = ((NSInteger (*)(id, SEL))objc_msgSend)(self,
-        sel_registerName("_activeElementInterfaceOrientation"));
-    if (orientation == UIInterfaceOrientationPortrait || orientation == UIInterfaceOrientationUnknown) {
-        r.origin.x = cameraX - r.size.width / 2;
-        r.origin.y = cameraY - r.size.height / 2;
-    }
+    CGRect original = originalMinimumSensor(self, cmd), r = original;
+    r.origin.x = cameraX - r.size.width / 2;
+    r.origin.y = cameraY - r.size.height / 2;
+    logRotated("minimum", self, CGRectZero, original, r);
     return r;
 }
 
 static CGRect portraitFrame(id self, SEL cmd, CGRect bounds,
                             NSDirectionalEdgeInsets outsets, NSInteger direction)
 {
-    CGRect r = originalPortrait(self, cmd, bounds, outsets, direction);
+    CGRect original = originalPortrait(self, cmd, bounds, outsets, direction), r = original;
     /* Expanded cards grow to the right of the hole instead of extending off-screen. */
     CGFloat left = CGRectGetMinX(bounds) + 6;
     CGFloat right = CGRectGetMaxX(bounds) - 6;
     r.size.width = MIN(r.size.width, MAX(0, right - left));
     r.origin.x = MAX(left, MIN(r.origin.x, right - r.size.width));
     r.origin.y = MAX(CGRectGetMinY(bounds) + 4, r.origin.y);
+    logRotated("expanded", self, bounds, original, r);
     return r;
 }
 
