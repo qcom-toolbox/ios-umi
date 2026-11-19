@@ -15,6 +15,11 @@
     for every command buffer, offscreen ones too; `SWEET_MTL2_NO_TEXTURE_POOL=1` - no render-target reuse. The
     startup line says which are on: `surface sync on (100 ms cap), every command buffer, no texture pool`.
   - Plan: one boot each (SYNC_ALL first), user verdict on the four places.
+  - **Installed 2026-11-19 22:38 (user OK'd)** on a umi-0322-full fastboot boot, by a wait-for-link script (the USB
+    link dropped twice right after coming up): plugin f58991a8... (read back), `/var/local/mtl2-env` =
+    `TU_DARWIN_SERVICE=SweetAdreno` + `SWEET_MTL2_SURFACE_SYNC_ALL=1` (the useless `SWEET_MTL2_SURFACE_SYNC=*` line
+    dropped). Backups `SweetMetal2.sweet-pre-syncall2` (7a9634e5...) and `mtl2-env.sweet-pre-syncall2` next to them
+    and in `~/ios-umi-backup/gpu-2026-11-19/`. Loads at the next boot.
 
 - **2026-11-19 22:00: island landscape - camera position in every orientation (installed, NOT checked on screen)**
   (commit 6834cf1; phone file changed, user OK'd)
