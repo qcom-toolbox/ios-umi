@@ -299,7 +299,7 @@ static id
 sweet_sb_app_init(id self, SEL cmd)
 {
 	/* Load UIKit-linked extensions after framework +load entitlement checks. */
-	FILE *f = fopen("/var/tmp/sweet-island-loader.log", "a");
+	FILE *f = fopen(strcmp(getprogname(), "SpringBoard") ? "/var/tmp/sweet-island-loader-client.log" : "/var/tmp/sweet-island-loader.log", "a");
 	void *handle = dlopen("/usr/local/lib/libsweet-island.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (f != NULL) {
 		fprintf(f, "UIApplication init: %s island %s\n", object_getClassName(self), handle ? "loaded" : dlerror());
@@ -313,15 +313,17 @@ static void
 sweet_sb_init(void)
 {
 	sweet_maybe_run_probe();
-	/* Optional native Dynamic Island adapter, confined to SpringBoard. */
-	if (strcmp(getprogname(), "SpringBoard") == 0) {
+	/* Optional native Dynamic Island adapter: SpringBoard (host) and ClockAngel (Live Activity renderer,
+	 * which only needs SBSIsSystemApertureAvailable's cached answer; see sweet_island.m). */
+	bool island_client = strcmp(getprogname(), "ClockAngel") == 0;
+	if (strcmp(getprogname(), "SpringBoard") == 0 || island_client) {
 		/* UIKit is registered here; SpringBoard's image may not be registered yet. */
 		Class sb = objc_getClass("UIApplication");
 		SEL init = sel_registerName("init");
 		Method m = class_getInstanceMethod(sb, init);
-		FILE *f = fopen("/var/tmp/sweet-island-loader.log", "w");
+		FILE *f = fopen(island_client ? "/var/tmp/sweet-island-loader-client.log" : "/var/tmp/sweet-island-loader.log", "w");
 		if (f != NULL) {
-			fprintf(f, "UIApplication %p init %p\n", (void *)sb, (void *)m);
+			fprintf(f, "%s UIApplication %p init %p\n", getprogname(), (void *)sb, (void *)m);
 			fclose(f);
 		}
 		if (m != NULL) {

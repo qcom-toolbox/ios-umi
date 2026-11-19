@@ -56,6 +56,38 @@ static long *artworkCache(long (*subtype)(void))
     long *value = (void *)(page + pages * 4096 + ((code[7] >> 10) & 0xfff) * 8);
     return *value == subtype() ? value : NULL;
 }
+/* Activity renderers (ClockAngel) ask SpringBoardServices' SBSIsSystemApertureAvailable, which reads the
+ * MobileGestalt artwork subtype (2436 here) once and caches YES only for 2556/2796. With NO, the client's
+ * SBUISystemApertureElementSource never publishes layout modes >= 2, so SpringBoard's
+ * SBSystemApertureSceneElement never becomes ready and the Live Activity is not shown in the island.
+ * Same fast path as above: ADRP x8 / LDRB w0 after the dispatch_once check; fail closed otherwise. */
+static uint8_t *apertureCache(bool (*available)(void))
+{
+    const uint32_t *code = (const void *)available;
+    if ((code[6] & 0x9f00001f) != 0x90000008 ||
+        (code[7] & 0xffc003ff) != 0x39400100 ||
+        code[8] != 0xa8c17bfd || code[9] != 0xd65f03c0) return NULL;
+    int64_t pages = ((code[6] >> 29) & 3) | (((code[6] >> 5) & 0x7ffff) << 2);
+    if (pages & (1 << 20)) pages -= 1 << 21;
+    uintptr_t page = (uintptr_t)&code[6] & ~(uintptr_t)0xfff;
+    uint8_t *value = (void *)(page + pages * 4096 + ((code[7] >> 10) & 0xfff));
+    return *value == (uint8_t)available() ? value : NULL;
+}
+
+static void installClient(void)
+{
+    FILE *f = fopen("/var/tmp/sweet-island-client.log", "a");
+    bool (*available)(void) = dlsym(RTLD_DEFAULT, "SBSIsSystemApertureAvailable");
+    bool before = available ? available() : false; /* initialize the dispatch_once cache */
+    uint8_t *cached = available ? apertureCache(available) : NULL;
+    if (cached) *cached = 1;
+    if (f) {
+        fprintf(f, "%s[%d]: aperture available %d -> %d%s\n", getprogname(), getpid(), before,
+                available ? available() : -1, cached ? "" : " (not patched: pattern mismatch)");
+        fclose(f);
+    }
+}
+
 static CGSize sensorSize(id self, SEL cmd) { (void)self; (void)cmd; return CGSizeMake(24, 24); }
 static CGSize inertSize(id self, SEL cmd) { (void)self; (void)cmd; return CGSizeMake(28, 28); }
 static BOOL hideFallback(id self, SEL cmd) { (void)self; (void)cmd; return YES; }
@@ -165,7 +197,9 @@ missing:
 
 __attribute__((constructor)) static void prepare(void)
 {
-    if (strcmp(getprogname(), "SpringBoard") || access("/var/tmp/sweet-island.disabled", F_OK) == 0) return;
+    if (access("/var/tmp/sweet-island.disabled", F_OK) == 0) return;
+    if (strcmp(getprogname(), "ClockAngel") == 0) { installClient(); return; }
+    if (strcmp(getprogname(), "SpringBoard")) return;
     /* One failed launch automatically restores the ordinary UI on the next launch. */
     if (access("/var/tmp/sweet-island.starting", F_OK) == 0) {
         FILE *f = fopen("/var/tmp/sweet-island.disabled", "w");
