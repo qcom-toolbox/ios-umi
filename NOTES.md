@@ -20,6 +20,11 @@
     `TU_DARWIN_SERVICE=SweetAdreno` + `SWEET_MTL2_SURFACE_SYNC_ALL=1` (the useless `SWEET_MTL2_SURFACE_SYNC=*` line
     dropped). Backups `SweetMetal2.sweet-pre-syncall2` (7a9634e5...) and `mtl2-env.sweet-pre-syncall2` next to them
     and in `~/ios-umi-backup/gpu-2026-11-19/`. Loads at the next boot.
+  - **Booted (fastboot, 23:00): backboardd `surface sync on (100 ms cap), every command buffer`; user: "still flickers
+    on lock screen sometimes"** (dock / status bar / notifications not mentioned). Frames 42.4 / 17.0 / 13.0 fps.
+    The posters (PosterBoard, CollectionsPoster, Pride...) draw the lock screen in their own processes and are not
+    synced (PridePosterExtension: `surface sync off ..., every command buffer`). Next: `SWEET_MTL2_SURFACE_SYNC=*`
+    together with SYNC_ALL, so the posters wait too.
 
 - **2026-11-19 22:00: island landscape - camera position in every orientation (installed, NOT checked on screen)**
   (commit 6834cf1; phone file changed, user OK'd)
