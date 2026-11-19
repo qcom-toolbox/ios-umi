@@ -2,6 +2,23 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-19 22:00: island landscape - camera position in every orientation (installed, NOT checked on screen)**
+  (commit 6834cf1; phone file changed, user OK'd)
+  - SpringBoard has only `_portraitFrameForPrimaryContainerViewInBounds:...` plus `transformForRotationToInterfaceOrientation:`
+    and `_bailForHandlingPanGestureDueToLandscapeOrientation`: like a 14 Pro, the aperture stays in hardware (portrait)
+    space and the element content is rotated. The old code skipped the camera offset when not portrait, so Apple's
+    top-centre position (middle of the long edge in landscape) was used. Now `_frameForSensorRegionInBounds:` and
+    `minimumSensorRegionFrame` always use the camera (46.18, 20.14 pt), except when the bounds are wider than 376 pt
+    (rotated space: left to Apple, logged). Every non-portrait call (sensor / minimum / expanded) logs orientation,
+    bounds, Apple's rect and ours to `/var/tmp/sweet-island.log` (first 80).
+  - Installed: rm + put `/usr/local/lib/libsweet-island.dylib` (70272 bytes, read back identical); previous (ClockAngel
+    build, 70240) as `.sweet-pre-landscape` on the phone and `~/ios-umi-backup/island-2026-11-19/`. Rebooted through
+    fastboot (`umi-0322-full.img`); SpringBoard loaded it (artwork 2556, portrait sensor x34.2 y8.1 unchanged).
+  - **Not verified:** the user has no app that rotates installed, so no landscape screen check and no landscape log lines
+    yet. The USB link dropped at 21:57 (live log just ends, no panic) before the log could be read again. Next: open a
+    rotating app (Photos picture, Safari, Calculator if present) with a timer running, read the "orientation" lines,
+    check the expanded card stays on screen in landscape.
+
 - **2026-11-19: CLOCK TIMER SHOWS IN THE DYNAMIC ISLAND (user-confirmed)** (commit a983e05; phone files changed, user OK'd)
   - Cause: SpringBoard did create the island element ("started, creating system aperture element", ClockAngel's
     ActivityUIServices.SystemAperture scene connects), but `-[SBActivitySystemApertureElementObserver

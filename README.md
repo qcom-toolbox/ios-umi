@@ -24,6 +24,7 @@ The project started on the Redmi Note 10 Pro (`sweet`, SM7150), hence its name; 
 | Brightness | `AppleARMBacklight` for CoreBrightness; the Control Center and Settings slider set the panel level with DCS 0x51 over DSI; the panel goes dark on lock and comes back with the power button; auto-brightness from the ambient light sensor (SLPI firmware booted by the kernel, read through QRTR/SEE) |
 | Night Shift | iOS's display color matrix goes to the display controller's color correction (DSPP PCC) |
 | GUI | backboardd, SpringBoard, lock screen, home screen, Control Center, notification center, Settings, wallpapers |
+| Dynamic Island | iOS 16's own Dynamic Island over the Mi 10's top-left camera hole (`libsweet-island`): lock screen and the Clock timer Live Activity; landscape untested, third-party Live Activities not yet |
 | Touch | ST FTM5 over I²C (GENI with GPI DMA), delivered as HID digitizer events |
 | Buttons | Power, volume up/down (PMIC through SPMI) as HID keys; lock/wake works |
 | Battery | IOPMPowerSource from the PM8150B fuel gauge: real percentage, voltage, current and charging state |

@@ -17,6 +17,7 @@
 | 💾 UFS | Own host driver, HFS+ root in `userdata`, read/write; the root volume was grown online from 16 to 32 GiB (2026-11-14) | ✅ |
 | 🖥️ Display | 1080×2340 AMOLED, presented as the iPhone X panel; the whole 1125×2436 frame is scaled to the panel by the display pipe (kernel 0296), so the status bar and dock fit inside the rounded corners | ✅ |
 | 📱 Status bar / camera hole | Clock moved right of the front camera hole, right icons and Control Center carrier in place (`libsweet-sb`, kernel 0297) | ✅ |
+| 🏝️ Dynamic Island | Native iOS 16 island over the top-left camera hole (`libsweet-island`, loaded by `libsweet-sb`; SpringBoard told it is a 14 Pro-class panel, only in-process): lock screen, Clock timer Live Activity (user, 2026-11-19). Landscape: the island is kept at the camera in every orientation (installed), not checked on screen; third-party Live Activities not enabled (only ClockAngel is) | ⚠️ |
 | 📷 Photos | Library is created since kernel 0301 (TCC sandbox extensions); it closed at start because the Metal device reported 0 texture size limits; SweetMetal2 fills them since 2026-11-14: Photos opens | ✅ |
 | 🖼️ Wallpaper / HEIC | Stock wallpapers and posters, the choice stays after a reboot; HEIC decodes correctly since kernel 0303 (IOSurface plane strides 0300, use counts 0303) - test-program verified, on-screen check pending | ⚠️ |
 | ⌨️ Keyboard | Keys kept 12 pt off the curved sides (`libsweet-sb`); emoji / dictation layouts and landscape not checked | ⚠️ |
