@@ -2,6 +2,26 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-19: CLOCK TIMER SHOWS IN THE DYNAMIC ISLAND (user-confirmed)** (commit a983e05; phone files changed, user OK'd)
+  - Cause: SpringBoard did create the island element ("started, creating system aperture element", ClockAngel's
+    ActivityUIServices.SystemAperture scene connects), but `-[SBActivitySystemApertureElementObserver
+    _createAndActivateSystemApertureElementWithScene:item:completion:]` only registers the SBSystemApertureSceneElement
+    once its readyForPresentationHandler fires; `-[SBSystemApertureSceneElement _updateReadyForPresentationIfNeeded]`
+    needs the client's SBUISA_contentRole, SBUISA_maximumLayoutMode >= 2 and SBUISA_preferredLayoutMode >= 2. In the
+    client, SpringBoardUIServices' `SBUIIsSystemApertureEnabled` = (bundle com.apple.springboard ? artwork 2556/2796 :
+    `SBSIsSystemApertureAvailable()`) && SBSEnableJindo; SBSIsSystemApertureAvailable (SpringBoardServices) reads the
+    MobileGestalt artwork subtype once (dispatch_once) and is NO for 2436. So ClockAngel never published layout modes.
+  - Fix: libsweet-sb now also dlopens libsweet-island in ClockAngel (at UIApplication init); there the island lib only
+    sets SBSIsSystemApertureAvailable's cached byte to 1 (ADRP x8 / LDRB w0 fast path validated, fail closed). No
+    MobileGestalt change, no other processes. Logs: `/var/tmp/sweet-island-client.log` ("ClockAngel[319]: aperture
+    available 0 -> 1"), `/var/tmp/sweet-island-loader-client.log`. Third-party Live Activity renderers would need
+    the same (not done: only ClockAngel is listed).
+  - Installed on a `umi-0322-full.img` fastboot boot: rm + put of `/usr/local/lib/libsweet-{sb,island}.dylib`
+    (70416 / 70240 bytes, read back identical); previous files as `*.dylib.sweet-pre-clockangel` on the phone and in
+    `~/ios-umi-backup/island-2026-11-19/`. The 11-17 reinstall had kept libsweet-island (70192 bytes) and SpringBoard
+    loaded it (artwork 2436 -> 2556). No reboot needed: ClockAngel started fresh with the timer.
+  - Still open: landscape geometry.
+
 - **2026-11-14: timer hooks rolled back; native countdown activity creation confirmed.**
   - objc_addLoadImageFunc callback caused Clock to crash before launch: `__os_unfair_lock_recursive_abort`
     (0x1d1b08f18) -> libobjc -> adapter callback -> objc_addLoadImageFunc. Runtime lock is not reentrant for
