@@ -2,6 +2,20 @@
 
 ## umi (Xiaomi Mi 10, SM8250) port - branch `umi` on qcom-toolbox/ios-sweet (2026-10-20)
 
+- **2026-11-19: GPU - remaining rare flicker (lock screen, notifications, dock, status bar): two test switches in
+  SweetMetal2 (built, not on the phone)** (diff `phone/metal2/frontend-sync-all-nopool.diff`, build
+  `xnu-work/work/m2v-bridge-src/out-syncall2/SweetMetal2.bundle/SweetMetal2`, sha256 f58991a8...; base = the
+  installed surface-sync build 7a9634e5...).
+  - Yesterday's boots: no GPU hang, reset or SMMU fault; 3502 of 3507 presents direct, 63 drawables held until the
+    flip latched, 0 forced; the 2 "wait fence TIMED OUT" lines are 0 ns polls. The surface sync waits only for
+    command buffers that write an IOSurface; what is left flickers where backboardd draws offscreen passes (blur,
+    masks, group opacity) into non-IOSurface render targets, which backboardd's texture pool (192 MB / 32 textures)
+    hands out again as new textures.
+  - Switches (mtl2-env, default off = today's behaviour): `SWEET_MTL2_SURFACE_SYNC_ALL=1` - a synced process waits
+    for every command buffer, offscreen ones too; `SWEET_MTL2_NO_TEXTURE_POOL=1` - no render-target reuse. The
+    startup line says which are on: `surface sync on (100 ms cap), every command buffer, no texture pool`.
+  - Plan: one boot each (SYNC_ALL first), user verdict on the four places.
+
 - **2026-11-19 22:00: island landscape - camera position in every orientation (installed, NOT checked on screen)**
   (commit 6834cf1; phone file changed, user OK'd)
   - SpringBoard has only `_portraitFrameForPrimaryContainerViewInBounds:...` plus `transformForRotationToInterfaceOrientation:`

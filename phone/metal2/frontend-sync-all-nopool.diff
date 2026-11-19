@@ -1,0 +1,33 @@
+--- NativeBridgeMetalFrontend.mm.pre-syncall2	2026-11-19 22:10:15
++++ NativeBridgeMetalFrontend.mm	2026-11-19 22:10:15
+@@ -263,6 +263,9 @@
+  else{*capBytes=0;*capCount=0;}
+ }
+ static bool canPoolTextureDesc(const NmbTextureDescriptor &req) {
++ // /var/local/mtl2-env SWEET_MTL2_NO_TEXTURE_POOL=1: no render-target reuse (test for the remaining flicker, 2026-11-19)
++ static const bool off=getenv("SWEET_MTL2_NO_TEXTURE_POOL") && !strcmp(getenv("SWEET_MTL2_NO_TEXTURE_POOL"),"1");
++ if(off)return false;
+  const char *prog=getprogname();
+  if(!prog || (strcmp(prog,"backboardd")!=0 && strcmp(prog,"SpringBoard")!=0))return false;
+  if(req.type!=MTLTextureType2D || req.depth!=1 || req.levels!=1 || req.samples!=1 || req.array_length!=1)return false;
+@@ -1393,7 +1396,8 @@
+   const char *t=getenv("SWEET_MTL2_SURFACE_SYNC_MS");
+   uint32_t n=t?(uint32_t)strtoul(t,nullptr,10):100;
+   if(n==0)on=false;
+-  char line[96];snprintf(line,sizeof line,"native-metal: surface sync %s (%u ms cap)",on?"on":"off",n);sm2_logs(line);
++  char line[160];snprintf(line,sizeof line,"native-metal: surface sync %s (%u ms cap)%s%s",on?"on":"off",n,
++   getenv("SWEET_MTL2_SURFACE_SYNC_ALL")?", every command buffer":"",getenv("SWEET_MTL2_NO_TEXTURE_POOL")?", no texture pool":"");sm2_logs(line);
+   return on?n:0;
+  }();
+  return ms;
+@@ -1592,7 +1596,9 @@
+   markSurfacesInUse(self);
+   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
+   void *context=(__bridge_retained void *)self;
+-  const uint32_t syncMs=_writtenSurfaces.count?surfaceSyncMs():0;   // read before the commit: completion clears the set
++  // SWEET_MTL2_SURFACE_SYNC_ALL=1: wait for every command buffer of a synced process, offscreen passes too (2026-11-19)
++  static const bool syncAll=getenv("SWEET_MTL2_SURFACE_SYNC_ALL") && !strcmp(getenv("SWEET_MTL2_SURFACE_SYNC_ALL"),"1");
++  const uint32_t syncMs=(syncAll || _writtenSurfaces.count)?surfaceSyncMs():0;   // read before the commit: completion clears the set
+   NmbCommandBuffer *handle=_handle;
+   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
+      nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle)) {
